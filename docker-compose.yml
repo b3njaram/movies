@@ -1,0 +1,47 @@
+services:
+  prowlarr:
+    image: linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - /home/osvaldoramirez/movies/data/prowlarr:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+
+  torrserver:
+    image: yourok/torrserver:latest
+    container_name: torrserver
+    volumes:
+      - /home/osvaldoramirez/movies/data/torrserver:/opt/ts/config
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: streamhub-backend
+    environment:
+      - PROWLARR_URL=http://prowlarr:9696
+      - PROWLARR_API_KEY=${PROWLARR_API_KEY}
+      - TORRSERVER_URL=http://torrserver:8090
+      - PORT=4000
+      - JWT_SECRET=${JWT_SECRET}
+      - DB_PATH=/app/data/streamhub.db
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+    volumes:
+      - ./data/app:/app/data
+    depends_on:
+      - prowlarr
+      - torrserver
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: streamhub-frontend
+    ports:
+      - "3111:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
