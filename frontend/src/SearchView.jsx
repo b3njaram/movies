@@ -2,10 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { api } from './api';
 import { useApp } from './context';
 import Card from './Card';
-import { SourceRow } from './SourcePicker';
+import { SourceRow, SkippedNote } from './SourcePicker';
 
 export default function SearchView({ query }) {
-  const { profile, openTitle, playTitle, play } = useApp();
+  const { profile, openTitle, playTitle, play, download } = useApp();
   const [catalog, setCatalog] = useState({ loading: true, results: [], configured: true });
   const [raw, setRaw] = useState(null); // null = not requested yet
 
@@ -24,7 +24,7 @@ export default function SearchView({ query }) {
   const searchRaw = () => {
     setRaw({ loading: true, results: [], error: '' });
     api(`/api/sources?q=${encodeURIComponent(query)}`)
-      .then((d) => setRaw({ loading: false, results: d.results, error: '' }))
+      .then((d) => setRaw({ loading: false, results: d.results, skipped: d.skipped || [], error: '' }))
       .catch((e) => setRaw({ loading: false, results: [], error: e.message }));
   };
 
@@ -34,8 +34,9 @@ export default function SearchView({ query }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catalog.loading, catalog.configured]);
 
-  const playRaw = (source) =>
-    play({ type: 'raw', title: source.title, magnet: source.link, sizeLabel: source.size, indexer: source.indexer });
+  const rawSpec = (source) => ({ type: 'raw', title: source.title, magnet: source.link, sizeLabel: source.size, indexer: source.indexer });
+  const playRaw = (source) => play(rawSpec(source));
+  const playRawFixed = (source) => play({ ...rawSpec(source), audioFix: true });
 
   return (
     <div className="min-h-screen px-[4%] pb-24 pt-28 animate-fadeIn">
@@ -95,9 +96,10 @@ export default function SearchView({ query }) {
                 )}
                 <div className="thin-scroll max-h-[520px] overflow-y-auto">
                   {raw.results.map((s) => (
-                    <SourceRow key={s.id} source={s} onPick={playRaw} />
+                    <SourceRow key={s.id} source={s} onPick={playRaw} onPickFix={playRawFixed} onDownload={(src) => download(src)} />
                   ))}
                 </div>
+                <SkippedNote skipped={raw.skipped} />
               </div>
             </>
           )}

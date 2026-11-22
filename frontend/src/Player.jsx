@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api, getProfileId, sendBeaconJson } from './api';
+import { api, BASE, getProfileId, sendBeaconJson } from './api';
+import { useApp } from './context';
 import {
   BackIcon,
+  ChevronDown,
+  DownloadIcon,
   ExitFullscreenIcon,
   Forward10,
   FullscreenIcon,
@@ -14,10 +17,17 @@ import {
   VolumeIcon,
   WarningIcon,
 } from './Icons';
-import SourcePicker from './SourcePicker';
+import SourcesDrawer from './SourcesDrawer';
+import { LangChip } from './SourcePicker';
 import { contentKeyOf, cx, fmtSpeed, fmtTime } from './utils';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+// Automatic source fallback: how many candidates one search pass will try to connect to, how many
+// sources may fail in total before giving up, and how long a connected source may stay silent.
+const MAX_AUTO_SOURCES = 6;
+const MAX_FALLBACKS = 8;
+const STARTUP_TIMEOUT_MS = Number(import.meta.env.VITE_STARTUP_TIMEOUT_MS) || 45000;
 
 function loadVolume() {
   try {
@@ -28,7 +38,43 @@ function loadVolume() {
   }
 }
 
+// "Always use the audio fix when a file needs it" — remembered once the viewer turns it on.
+const autoFixPref = () => {
+  try {
+    return localStorage.getItem('sh_audiofix') === '1';
+  } catch {
+    return false;
+  }
+};
+const setAutoFixPref = (on) => {
+  try {
+    localStorage.setItem('sh_audiofix', on ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+};
+
+const LANG_ALIAS = { fre: 'fra', ger: 'deu', chi: 'zho', dut: 'nld', gre: 'ell', cze: 'ces', rum: 'ron', per: 'fas' };
+function langName(code) {
+  if (!code || code === 'und') return null;
+  try {
+    const name = new Intl.DisplayNames(['en'], { type: 'language' }).of(LANG_ALIAS[code] || code);
+    if (name && name !== code) return name;
+  } catch {
+    /* fall through */
+  }
+  return code.toUpperCase();
+}
+
+function trackLabel(t) {
+  const ch = t.channels === 6 ? ' 5.1' : t.channels === 8 ? ' 7.1' : t.channels > 2 ? ` ${t.channels}ch` : '';
+  const name = langName(t.lang) || `Track ${t.ord + 1}`;
+  return `${name}${t.title ? ` \u2013 ${t.title}` : ''} \u00b7 ${String(t.codec).toUpperCase()}${ch}`;
+}
+
 export default function Player({ spec, onClose, onNext }) {
+  const { notify, download } = useApp();
+
   const wrapRef = useRef(null);
   const videoRef = useRef(null);
   const barRef = useRef(null);
@@ -42,6 +88,15 @@ export default function Player({ spec, onClose, onNext }) {
   const streamRef = useRef(null);
   const lastPos = useRef({ t: 0, d: 0 });
   const menuOpenRef = useRef(false);
+  const fixExplicitRef = useRef(Boolean(spec.audioFix));
+  const hintDismissedRef = useRef(false);
+  const fixOnRef = useRef(false);
+  const baseRef = useRef(0);
+  const durRef = useRef(0);
+  const failedRef = useRef(new Set()); // source links that connected but would not play
+  const currentLinkRef = useRef(null); // the source currently being played
+  const playedRef = useRef(false); // has this source produced picture yet?
+  const forcedRef = useRef(null);
 
   const [phase, setPhase] = useState('resolving'); // resolving | ready | error
   const [message, setMessage] = useState('Finding the best source…');
@@ -50,6 +105,11 @@ export default function Player({ spec, onClose, onNext }) {
   const [attempt, setAttempt] = useState(0);
   const [forced, setForced] = useState(spec.source || null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // log of the sources this viewing has tried and what happened to each
+  const [attempts, setAttempts] = useState([]);
+  const attemptsRef = useRef([]);
+  const [searched, setSearched] = useState(null); // the player's own source search, reused by the drawer
+  const [nowPlaying, setNowPlaying] = useState(null);
 
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
@@ -69,8 +129,45 @@ export default function Player({ spec, onClose, onNext }) {
   const [scrub, setScrub] = useState(null);
   const [hoverPct, setHoverPct] = useState(null);
 
+  // audio fix
+  const [fixOn, setFixOn] = useState(false);
+  const [fixOffset, setFixOffset] = useState(0);
+  const [fixTrack, setFixTrack] = useState(0);
+  const [fixInfo, setFixInfo] = useState(null);
+  const [fixBusy, setFixBusy] = useState(false);
+  const [audioMenu, setAudioMenu] = useState(false);
+  const [noAudioHint, setNoAudioHint] = useState(false);
+
   const contentKey = contentKeyOf(spec);
-  menuOpenRef.current = rateMenu || pickerOpen;
+  menuOpenRef.current = rateMenu || pickerOpen || audioMenu;
+  forcedRef.current = forced;
+
+  const markAttempt = useCallback((link, patch = {}, { fill = false } = {}) => {
+    const list = attemptsRef.current;
+    let a = list.find((x) => x.link === link);
+    if (!a) {
+      a = { link, status: 'trying' };
+      list.push(a);
+    }
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined || v === null) continue;
+      if (fill && a[k] !== undefined && a[k] !== null && a[k] !== '') continue;
+      a[k] = v;
+    }
+    setAttempts(list.map((x) => ({ ...x })));
+  }, []);
+
+  // In audio-fix mode the <video> only knows the time since its own (re)start, so the real position
+  // is the stream's start offset plus the video's currentTime. Everything below goes through these.
+  fixOnRef.current = fixOn;
+  baseRef.current = fixOn ? fixOffset : 0;
+  durRef.current = Number.isFinite(duration) && duration > 0 ? duration : 0;
+
+  const videoSrc = stream
+    ? fixOn
+      ? `${BASE}/api/audiofix/stream?hash=${stream.hash}&index=${stream.fileIndex}&t=${Math.floor(fixOffset)}&a=${fixTrack}`
+      : stream.streamUrl
+    : null;
 
   // ---------------------------------------------------------------------
   // Progress reporting
@@ -89,6 +186,25 @@ export default function Player({ spec, onClose, onNext }) {
     if (beacon) sendBeaconJson('/api/progress', body);
     else api('/api/progress', { method: 'POST', body }).catch(() => {});
   }, []);
+
+  // Download the very file that is playing (it is already registered, so this starts at once).
+  const downloadCurrent = useCallback(() => {
+    const st = streamRef.current;
+    if (!st) return;
+    const a = document.createElement('a');
+    a.href = `${BASE}/api/download?hash=${st.hash}&index=${st.fileIndex}&name=${encodeURIComponent(st.fileName)}`;
+    a.download = st.fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    notify(`Downloading ${st.fileName} (${st.fileSize})`);
+  }, [notify]);
+
+  useEffect(() => {
+    if (!nowPlaying) return undefined;
+    const t = setTimeout(() => setNowPlaying(null), 7000);
+    return () => clearTimeout(t);
+  }, [nowPlaying]);
 
   const finish = useCallback(() => {
     reportNow();
@@ -127,6 +243,10 @@ export default function Player({ spec, onClose, onNext }) {
     canReport.current = false;
     resumedRef.current = false;
     seekingRef.current = false;
+    playedRef.current = false;
+    currentLinkRef.current = null;
+    for (const a of attemptsRef.current) if (a.status === 'playing') a.status = 'switched';
+    setAttempts(attemptsRef.current.map((x) => ({ ...x })));
 
     (async () => {
       setPhase('resolving');
@@ -135,7 +255,19 @@ export default function Player({ spec, onClose, onNext }) {
       setErrorText('');
       setBuffering(true);
       setPickerOpen(false);
-      setMessage(forced ? 'Connecting to peers…' : spec.magnet ? 'Resuming…' : 'Finding the best source…');
+      setFixOn(false);
+      setFixOffset(0);
+      setNoAudioHint(false);
+      const failures = failedRef.current.size;
+      setMessage(
+        failures
+          ? `That source would not play \u2014 trying another (${failures + 1})\u2026`
+          : forced
+            ? 'Connecting to peers…'
+            : spec.magnet
+              ? 'Resuming…'
+              : 'Finding the best source…'
+      );
 
       resumeAtRef.current = 0;
       if (!spec.startOver && contentKey) {
@@ -153,15 +285,38 @@ export default function Player({ spec, onClose, onNext }) {
         for (let i = 0; i < list.length; i++) {
           if (cancelled) return null;
           if (i > 0) setMessage('That source did not respond \u2014 trying another\u2026');
+          const cand = list[i];
+          const c = cand.src || {};
+          markAttempt(cand.link, {
+            status: 'trying',
+            reason: '',
+            title: cand.saved ? 'Source from your last viewing' : c.title,
+            quality: c.quality,
+            audio: c.audio,
+            lang: c.lang,
+            langMatch: c.langMatch,
+            langAssumed: c.langAssumed,
+            size: c.size || (cand.saved ? spec.sizeLabel : undefined),
+            seeders: c.seeders,
+            indexer: c.indexer,
+          });
           try {
             const data = await api('/api/stream', {
               method: 'POST',
-              body: { link: list[i].link, season: spec.season, episode: spec.episode, contentKey },
+              body: { link: cand.link, season: spec.season, episode: spec.episode, contentKey },
             });
             if (cancelled) return null;
-            return { data, src: list[i].src };
+            const rel = data.release || {};
+            if (cand.saved) markAttempt(cand.link, { title: data.torrentName }); // replace the placeholder
+            markAttempt(
+              cand.link,
+              { title: data.torrentName, quality: rel.quality, audio: rel.audio, lang: rel.lang, langAssumed: rel.langAssumed, size: data.fileSize },
+              { fill: true }
+            );
+            return { data, src: cand.src, link: cand.link };
           } catch (e) {
             lastError = e;
+            markAttempt(cand.link, { status: 'failed', reason: String(e.message || '').replace(/\s+/g, ' ').slice(0, 110) });
             if (e.code === 'AUTH') return null;
           }
         }
@@ -170,7 +325,7 @@ export default function Player({ spec, onClose, onNext }) {
 
       const first = [];
       if (forced) first.push({ link: forced.link, src: forced });
-      else if (spec.magnet) first.push({ link: spec.magnet, src: { indexer: spec.indexer } });
+      else if (spec.magnet && !failedRef.current.has(spec.magnet)) first.push({ link: spec.magnet, src: { indexer: spec.indexer }, saved: true });
 
       let result = await connect(first);
 
@@ -179,16 +334,26 @@ export default function Player({ spec, onClose, onNext }) {
         try {
           const params = new URLSearchParams({ type: spec.type, title: spec.title });
           if (spec.year) params.set('year', spec.year);
+          if (spec.tmdbId) params.set('tmdbId', spec.tmdbId);
           if (spec.season != null) {
             params.set('season', spec.season);
             params.set('episode', spec.episode);
           }
-          const { results } = await api(`/api/sources?${params}`);
+          const found = await api(`/api/sources?${params}`);
+          const { results } = found;
+          if (!cancelled) setSearched({ results: found.results, skipped: found.skipped || [], lang: found.lang });
           const list = results
-            .filter((r) => r.seeders > 0 && r.link !== spec.magnet)
-            .slice(0, 4)
+            .filter((r) => r.seeders > 0 && r.link !== spec.magnet && !failedRef.current.has(r.link))
+            .slice(0, MAX_AUTO_SOURCES)
             .map((r) => ({ link: r.link, src: r }));
-          if (!list.length && !lastError) lastError = new Error('No sources were found for this title on your indexers.');
+          if (!list.length && !lastError) {
+            const n = failedRef.current.size;
+            lastError = new Error(
+              n
+                ? `I tried ${n} source${n > 1 ? 's' : ''} and none of them would play. Open Sources to pick one yourself, or try again later.`
+                : 'No sources were found for this title on your indexers.'
+            );
+          }
           if (list.length) {
             setMessage('Connecting to peers…');
             result = await connect(list);
@@ -206,6 +371,7 @@ export default function Player({ spec, onClose, onNext }) {
       }
 
       const { data, src } = result;
+      currentLinkRef.current = result.link;
       if (!contentKey) {
         try {
           const p = await api(`/api/progress/get?contentKey=${encodeURIComponent(data.contentKey)}`);
@@ -213,6 +379,23 @@ export default function Player({ spec, onClose, onNext }) {
           resumeAtRef.current = p.positionSeconds || 0;
         } catch {
           /* ignore */
+        }
+      }
+
+      // Audio fix: only probed when it was asked for, or when the viewer chose "use it whenever needed".
+      let info = null;
+      let useFix = false;
+      const explicit = fixExplicitRef.current;
+      if (explicit || autoFixPref()) {
+        try {
+          setMessage('Preparing audio fix…');
+          info = await api(`/api/audiofix/probe?hash=${data.hash}&index=${data.fileIndex}`);
+          if (cancelled) return;
+          useFix = info.canFix && (explicit || info.needsFix);
+          if (explicit && !info.canFix) notify(info.reason);
+        } catch (e) {
+          if (cancelled) return;
+          if (explicit) notify(`Audio fix unavailable: ${e.message}`);
         }
       }
 
@@ -232,6 +415,16 @@ export default function Player({ spec, onClose, onNext }) {
         indexer: src?.indexer || spec.indexer || null,
       };
       streamRef.current = data;
+      setFixInfo(info);
+      setFixTrack(info?.defaultTrack ?? 0);
+      if (useFix) {
+        // the stream itself starts at the resume point, so no in-video seek is needed
+        resumedRef.current = true;
+        setFixOffset(Math.floor(resumeAtRef.current));
+        if (info.duration) setDuration(info.duration);
+      }
+      fixOnRef.current = useFix;
+      setFixOn(useFix);
       setStream(data);
       setMessage('Buffering…');
       setPhase('ready');
@@ -242,6 +435,29 @@ export default function Player({ spec, onClose, onNext }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt, forced]);
+
+  // The current source connected but cannot be watched (decode error, or no picture ever arrived).
+  // Unless the viewer picked it themselves, remember that and move on to the next-best source.
+  const failCurrent = useCallback(
+    (reason) => {
+      const link = currentLinkRef.current;
+      if (!link || playedRef.current || forcedRef.current || fixOnRef.current) return false;
+      if (failedRef.current.size >= MAX_FALLBACKS) return false;
+      failedRef.current.add(link);
+      markAttempt(link, { status: 'failed', reason });
+      setAttempt((n) => n + 1);
+      return true;
+    },
+    [markAttempt]
+  );
+
+  useEffect(() => {
+    if (phase !== 'ready' || !videoSrc) return undefined;
+    const t = setTimeout(() => {
+      if (!playedRef.current) failCurrent('No picture arrived within 45 seconds');
+    }, STARTUP_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [phase, videoSrc, failCurrent]);
 
   // Peer / speed readout (also tells the server this stream is still in use).
   useEffect(() => {
@@ -313,12 +529,39 @@ export default function Player({ spec, onClose, onNext }) {
     else v.pause();
   }, []);
 
-  const seekBy = useCallback((delta) => {
+  // Jump to an absolute position (seconds). In audio-fix mode a jump outside what has already been
+  // received restarts the converted stream at that point.
+  const seekTo = useCallback((target) => {
     const v = videoRef.current;
     if (!v) return;
-    const end = Number.isFinite(v.duration) ? v.duration : Infinity;
-    v.currentTime = Math.min(end, Math.max(0, v.currentTime + delta));
+    const total = durRef.current || Infinity;
+    const t = Math.max(0, Math.min(total - 1, target));
+    if (!fixOnRef.current) {
+      v.currentTime = t;
+      return;
+    }
+    const rel = t - baseRef.current;
+    const b = v.buffered;
+    let inBuffer = false;
+    for (let i = 0; i < b.length; i++) if (rel >= b.start(i) - 0.1 && rel <= b.end(i) - 1) inBuffer = true;
+    if (inBuffer) {
+      v.currentTime = rel;
+    } else {
+      setBuffering(true);
+      setTime(t);
+      lastPos.current = { t, d: durRef.current };
+      setFixOffset(Math.floor(t));
+    }
   }, []);
+
+  const seekBy = useCallback(
+    (delta) => {
+      const v = videoRef.current;
+      if (!v) return;
+      seekTo(baseRef.current + v.currentTime + delta);
+    },
+    [seekTo]
+  );
 
   const applyVolume = useCallback((val) => {
     const x = Math.min(1, Math.max(0, val));
@@ -343,7 +586,7 @@ export default function Player({ spec, onClose, onNext }) {
     if (!v) return;
     v.volume = volume;
     v.muted = muted;
-  }, [volume, muted, stream]);
+  }, [volume, muted, videoSrc]);
 
   const toggleFs = useCallback(() => {
     const el = wrapRef.current;
@@ -359,10 +602,88 @@ export default function Player({ spec, onClose, onNext }) {
     return () => document.removeEventListener('fullscreenchange', on);
   }, []);
 
+  // ---------------------------------------------------------------------
+  // Audio fix controls
+  // ---------------------------------------------------------------------
+
+  const currentAbs = () => {
+    const v = videoRef.current;
+    return v ? baseRef.current + v.currentTime : lastPos.current.t;
+  };
+
+  const toggleFix = useCallback(async () => {
+    const s = streamRef.current;
+    if (fixBusy || !s) return;
+    const at = currentAbs();
+
+    if (fixOnRef.current) {
+      // back to the original file, continuing from the same moment
+      fixExplicitRef.current = false;
+      setAutoFixPref(false);
+      resumeAtRef.current = at;
+      resumedRef.current = false;
+      seekingRef.current = false;
+      setBuffering(true);
+      setFixOn(false);
+      setFixOffset(0);
+      return;
+    }
+
+    setFixBusy(true);
+    try {
+      const info = fixInfo || (await api(`/api/audiofix/probe?hash=${s.hash}&index=${s.fileIndex}`));
+      setFixInfo(info);
+      if (!info.canFix) {
+        notify(info.reason);
+        return;
+      }
+      fixExplicitRef.current = true;
+      setAutoFixPref(true);
+      setNoAudioHint(false);
+      setFixTrack(info.defaultTrack ?? 0);
+      if (info.duration) setDuration(info.duration);
+      setBuffering(true);
+      setFixOffset(Math.floor(at));
+      setFixOn(true);
+    } catch (e) {
+      notify(`Audio fix unavailable: ${e.message}`);
+    } finally {
+      setFixBusy(false);
+    }
+  }, [fixBusy, fixInfo, notify]);
+
+  const changeTrack = (ord) => {
+    setAudioMenu(false);
+    if (ord === fixTrack) return;
+    const at = currentAbs();
+    setBuffering(true);
+    setFixOffset(Math.floor(at));
+    setFixTrack(ord);
+  };
+
+  // Best-effort "this file has no playable sound" detection (Firefox / Chromium expose it).
+  useEffect(() => {
+    if (fixOn || !playing || noAudioHint || hintDismissedRef.current) return undefined;
+    let n = 0;
+    const t = setInterval(() => {
+      const v = videoRef.current;
+      if (!v || v.paused) return;
+      n += 1;
+      const firefoxSilent = v.mozHasAudio === false && v.currentTime > 1.5;
+      const chromeSilent =
+        typeof v.webkitAudioDecodedByteCount === 'number' && v.webkitAudioDecodedByteCount === 0 && !v.muted && v.volume > 0 && v.currentTime > 3;
+      if (firefoxSilent || chromeSilent) {
+        setNoAudioHint(true);
+        clearInterval(t);
+      } else if (n > 8) clearInterval(t);
+    }, 1500);
+    return () => clearInterval(t);
+  }, [fixOn, playing, noAudioHint, videoSrc]);
+
   useEffect(() => {
     const onKey = (e) => {
-      if (pickerOpen) {
-        if (e.key === 'Escape') setPickerOpen(false);
+      if (pickerOpen && e.key === 'Escape') {
+        setPickerOpen(false);
         return;
       }
       switch (e.key) {
@@ -394,7 +715,8 @@ export default function Player({ spec, onClose, onNext }) {
           toggleFs();
           break;
         case 'Escape':
-          if (!document.fullscreenElement) finish();
+          if (audioMenu) setAudioMenu(false);
+          else if (!document.fullscreenElement) finish();
           break;
         default:
           return;
@@ -403,7 +725,7 @@ export default function Player({ spec, onClose, onNext }) {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [pickerOpen, toggle, seekBy, applyVolume, volume, toggleMute, toggleFs, finish, poke]);
+  }, [pickerOpen, audioMenu, toggle, seekBy, applyVolume, volume, toggleMute, toggleFs, finish, poke]);
 
   // ---------------------------------------------------------------------
   // <video> events
@@ -411,9 +733,9 @@ export default function Player({ spec, onClose, onNext }) {
 
   const onLoadedMetadata = (e) => {
     const v = e.currentTarget;
-    setDuration(v.duration);
+    if (!fixOnRef.current) setDuration(v.duration);
     const r = resumeAtRef.current;
-    if (!resumedRef.current && r > 10 && Number.isFinite(v.duration) && r < v.duration - 15) {
+    if (!resumedRef.current && !fixOnRef.current && r > 10 && Number.isFinite(v.duration) && r < v.duration - 15) {
       seekingRef.current = true;
       v.currentTime = r;
     }
@@ -424,18 +746,26 @@ export default function Player({ spec, onClose, onNext }) {
 
   const onTimeUpdate = (e) => {
     const v = e.currentTarget;
-    setTime(v.currentTime);
-    lastPos.current = { t: v.currentTime, d: Number.isFinite(v.duration) ? v.duration : 0 };
+    const base = baseRef.current;
+    const abs = base + v.currentTime;
+    setTime(abs);
+    const d = fixOnRef.current ? durRef.current : Number.isFinite(v.duration) ? v.duration : 0;
+    lastPos.current = { t: abs, d };
     const b = v.buffered;
     let end = 0;
     for (let i = 0; i < b.length; i++) {
       if (b.start(i) <= v.currentTime + 0.5 && b.end(i) > end) end = b.end(i);
     }
-    setBufferedEnd(end);
+    setBufferedEnd(base + end);
   };
 
   const onEnded = () => {
-    const { d } = lastPos.current;
+    const { t, d } = lastPos.current;
+    if (fixOnRef.current && d && t < d - 45) {
+      setPhase('error');
+      setErrorText('The audio-fix stream stopped early. Try again.');
+      return;
+    }
     lastPos.current = { t: d, d };
     reportNow();
     if (nextEp) setCountdown(8);
@@ -443,11 +773,13 @@ export default function Player({ spec, onClose, onNext }) {
   };
 
   const onVideoError = () => {
+    if (failCurrent('Your browser could not decode this file')) return; // moved on to the next source
     const code = videoRef.current?.error?.code;
+    if (currentLinkRef.current && !playedRef.current) markAttempt(currentLinkRef.current, { status: 'failed', reason: 'Your browser could not decode this file' });
     setPhase('error');
     setErrorText(
       code === 3 || code === 4
-        ? 'Your browser could not play this file \u2014 its video or audio format (for example HEVC video or AC3/DTS sound) is not supported. Try another source.'
+        ? 'Your browser could not play this file \u2014 its video or audio format (for example HEVC video) is not supported. Try the audio fix, or choose another source.'
         : 'The stream was interrupted. Try again, or pick another source.'
     );
   };
@@ -480,7 +812,7 @@ export default function Player({ spec, onClose, onNext }) {
     return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
   };
   const onBarDown = (e) => {
-    if (!duration) return;
+    if (!durRef.current) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     const p = pctFromEvent(e);
     scrubRef.current = p;
@@ -496,8 +828,7 @@ export default function Player({ spec, onClose, onNext }) {
   };
   const onBarUp = () => {
     if (scrubRef.current === null) return;
-    const v = videoRef.current;
-    if (v && duration) v.currentTime = scrubRef.current * duration;
+    if (durRef.current) seekTo(scrubRef.current * durRef.current);
     scrubRef.current = null;
     setScrub(null);
   };
@@ -506,16 +837,26 @@ export default function Player({ spec, onClose, onNext }) {
   // Render
   // ---------------------------------------------------------------------
 
-  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const safeDuration = durRef.current;
   const shownTime = scrub !== null ? scrub * safeDuration : time;
   const pct = safeDuration ? (shownTime / safeDuration) * 100 : 0;
   const bufPct = safeDuration ? (bufferedEnd / safeDuration) * 100 : 0;
-  const remaining = safeDuration ? safeDuration - shownTime : 0;
+  const remaining = safeDuration ? Math.max(0, safeDuration - shownTime) : 0;
 
   const controlsVisible = showControls || phase !== 'ready' || !playing;
   const hideCursor = phase === 'ready' && playing && !showControls;
   const nearEnd = nextEp && safeDuration > 0 && safeDuration - time <= 25 && !nextDismissed;
   const showNextCard = phase === 'ready' && !pickerOpen && (countdown !== null || nearEnd);
+  const tracks = fixInfo?.tracks || [];
+  const activeTrack = tracks.find((t) => t.ord === fixTrack) || tracks[0];
+
+  const playingAttempt = attempts.find((a) => a.status === 'playing');
+  const nowAttempt = nowPlaying ? attempts.find((a) => a.link === nowPlaying) : null;
+  const failedCount = attempts.filter((a) => a.status === 'failed').length;
+  const statusOf = (src) => {
+    const a = attempts.find((x) => x.link === src.link);
+    return a ? { status: a.status, reason: a.reason } : null;
+  };
 
   const heading =
     spec.type === 'tv' ? (
@@ -531,6 +872,7 @@ export default function Player({ spec, onClose, onNext }) {
     );
 
   const iconBtn = 'flex h-11 w-11 items-center justify-center rounded-full text-white transition-transform duration-150 hover:scale-125';
+  const topBtn = 'flex items-center gap-2 rounded px-3 py-2 text-sm text-white/90 transition-colors hover:bg-white/15';
 
   return (
     <div
@@ -538,21 +880,28 @@ export default function Player({ spec, onClose, onNext }) {
       className="fixed inset-0 z-[200] select-none overflow-hidden bg-black text-white"
       style={{ cursor: hideCursor ? 'none' : 'default' }}
     >
-      {stream && phase === 'ready' && (
+      {videoSrc && phase === 'ready' && (
         <video
-          key={stream.streamUrl}
+          key={videoSrc}
           ref={videoRef}
-          src={stream.streamUrl}
+          src={videoSrc}
           autoPlay
           playsInline
           className="absolute inset-0 h-full w-full bg-black object-contain"
           onClick={() => (showControls ? toggle() : poke())}
           onDoubleClick={toggleFs}
           onLoadedMetadata={onLoadedMetadata}
-          onDurationChange={(e) => setDuration(e.currentTarget.duration)}
+          onDurationChange={(e) => {
+            if (!fixOnRef.current) setDuration(e.currentTarget.duration);
+          }}
           onTimeUpdate={onTimeUpdate}
           onPlay={() => setPlaying(true)}
           onPlaying={() => {
+            if (!playedRef.current && currentLinkRef.current) {
+              markAttempt(currentLinkRef.current, { status: 'playing', reason: '' });
+              setNowPlaying(currentLinkRef.current);
+            }
+            playedRef.current = true;
             setPlaying(true);
             setBuffering(false);
             if (!seekingRef.current) canReport.current = true;
@@ -578,7 +927,37 @@ export default function Player({ spec, onClose, onNext }) {
       {(phase === 'resolving' || (phase === 'ready' && buffering)) && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-5 animate-fadeIn">
           <div className="nf-spinner" />
-          {phase === 'resolving' && <p className="max-w-[80%] text-center text-lg text-white/80">{message}</p>}
+          {phase === 'resolving' && (
+            <>
+              <p className="max-w-[80%] text-center text-lg text-white/80">{message}</p>
+              {attempts.length > 0 && (
+                <ul className="w-[min(92vw,560px)] space-y-1.5" aria-label="Sources being tried">
+                  {attempts.slice(-5).map((a) => (
+                    <li key={a.link} className="flex items-start gap-2 rounded bg-white/[0.06] px-3 py-2 text-left text-xs">
+                      <span
+                        className={cx(
+                          'mt-px w-4 shrink-0 text-center font-bold',
+                          a.status === 'failed' ? 'text-red-300' : a.status === 'playing' ? 'text-emerald-300' : 'text-sky-300'
+                        )}
+                      >
+                        {a.status === 'failed' ? '✕' : a.status === 'playing' ? '▶' : '…'}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-white/90">{a.title || 'Connecting…'}</span>
+                        <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-white/50">
+                          {a.quality && <span>{a.quality}</span>}
+                          <LangChip lang={a.lang} langMatch={a.langMatch} langAssumed={a.langAssumed} />
+                          {a.audio && <span>{a.audio}</span>}
+                          {a.size && <span>{a.size}</span>}
+                          {a.reason && <span className="text-red-300/80">{a.reason}</span>}
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
           {phase === 'ready' && stats && (
             <p className="text-sm text-white/60">
               {fmtSpeed(stats.downloadSpeed)} &middot; {stats.activePeers} peers connected
@@ -590,7 +969,7 @@ export default function Player({ spec, onClose, onNext }) {
       {/* error */}
       {phase === 'error' && (
         <div className="absolute inset-0 flex items-center justify-center bg-black px-6 animate-fadeIn">
-          <div className="max-w-[520px] text-center">
+          <div className="max-w-[560px] text-center">
             <WarningIcon size={56} className="mx-auto text-nf-red" />
             <h2 className="mt-4 text-2xl font-bold">We can&apos;t play this right now</h2>
             <p className="mt-2 text-[#b3b3b3]">{errorText}</p>
@@ -598,6 +977,17 @@ export default function Player({ spec, onClose, onNext }) {
               {spec.type !== 'raw' && (
                 <button onClick={() => setPickerOpen(true)} className="btn-white">
                   Choose another source
+                </button>
+              )}
+              {!fixOn && streamRef.current && (
+                <button
+                  onClick={() => {
+                    fixExplicitRef.current = true;
+                    setAttempt((n) => n + 1);
+                  }}
+                  className="btn-gray"
+                >
+                  <VolumeIcon size={18} /> Try audio fix
                 </button>
               )}
               <button onClick={() => setAttempt((n) => n + 1)} className="btn-gray">
@@ -614,7 +1004,7 @@ export default function Player({ spec, onClose, onNext }) {
       {/* top bar */}
       <div
         className={cx(
-          'absolute inset-x-0 top-0 flex items-center gap-3 bg-gradient-to-b from-black/80 to-transparent px-[3%] pb-10 pt-5 transition-opacity duration-300',
+          'absolute inset-x-0 top-0 flex items-center gap-1 bg-gradient-to-b from-black/80 to-transparent px-[3%] pb-10 pt-5 transition-opacity duration-300 sm:gap-2',
           controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
         )}
       >
@@ -622,12 +1012,105 @@ export default function Player({ spec, onClose, onNext }) {
           <BackIcon size={32} />
         </button>
         <div className="flex-1" />
-        {spec.type !== 'raw' && phase !== 'resolving' && (
-          <button onClick={() => setPickerOpen(true)} className="flex items-center gap-2 rounded px-3 py-2 text-sm text-white/90 transition-colors hover:bg-white/15">
-            <ListIcon size={20} /> Sources
+
+        {fixOn && tracks.length > 1 && (
+          <div className="relative">
+            <button onClick={() => setAudioMenu((v) => !v)} aria-label="Choose audio language" className={topBtn}>
+              <VolumeIcon size={18} />
+              <span className="max-w-[160px] truncate">{activeTrack ? langName(activeTrack.lang) || `Track ${activeTrack.ord + 1}` : 'Audio'}</span>
+              <ChevronDown size={14} />
+            </button>
+            {audioMenu && (
+              <div className="absolute right-0 top-11 z-10 w-72 animate-dropIn overflow-hidden rounded bg-black/95 py-1 shadow-2xl">
+                <p className="px-4 pb-1 pt-2 text-xs font-bold uppercase tracking-wider text-white/50">Audio</p>
+                {tracks.map((t) => (
+                  <button
+                    key={t.ord}
+                    onClick={() => changeTrack(t.ord)}
+                    className={cx('block w-full px-4 py-2 text-left text-sm hover:bg-white/15', t.ord === fixTrack ? 'font-bold text-white' : 'text-white/70')}
+                  >
+                    {t.ord === fixTrack ? '\u2713 ' : ''}
+                    {trackLabel(t)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {phase === 'ready' && (
+          <button
+            onClick={toggleFix}
+            disabled={fixBusy}
+            aria-pressed={fixOn}
+            title="Keeps the picture exactly as it is and converts the sound to AAC. Use it when a release plays without sound (AC3, E-AC3, DTS, TrueHD). Your choice is remembered."
+            className={cx(topBtn, fixOn && '!bg-white font-bold !text-black hover:!bg-white/80', fixBusy && 'opacity-60')}
+          >
+            <VolumeIcon size={18} />
+            {fixBusy ? 'Preparing\u2026' : fixOn ? 'Audio fix: On' : 'Audio fix'}
           </button>
         )}
+        <button onClick={() => setPickerOpen((v) => !v)} aria-pressed={pickerOpen} className={cx(topBtn, pickerOpen && 'bg-white/15')}>
+          <ListIcon size={20} /> Sources
+          {playingAttempt && (
+            <span className="hidden items-center gap-1 rounded bg-white/15 px-1.5 py-px text-[11px] font-bold sm:inline-flex">
+              {[playingAttempt.quality, playingAttempt.lang].filter(Boolean).join(' · ')}
+            </span>
+          )}
+        </button>
       </div>
+
+      {/* which source is playing — appears briefly, never blocks the picture or the controls */}
+      {nowAttempt && phase === 'ready' && !pickerOpen && (
+        <div className="pointer-events-none absolute left-[3%] top-24 z-10 w-[min(90vw,440px)] animate-slideLeft rounded-md border border-white/15 bg-black/80 p-3 shadow-2xl backdrop-blur">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-white/50">
+            Now playing
+            {failedCount > 0 && (
+              <span className="font-normal normal-case tracking-normal text-white/60">
+                {' '}
+                · after {failedCount} source{failedCount > 1 ? 's' : ''} that would not play
+              </span>
+            )}
+          </p>
+          <p className="mt-1 break-all text-[13px] font-medium leading-snug">{nowAttempt.title}</p>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#b3b3b3]">
+            {nowAttempt.quality && <span className="rounded bg-white/10 px-1.5 py-px font-bold text-white">{nowAttempt.quality}</span>}
+            <LangChip lang={nowAttempt.lang} langMatch={nowAttempt.langMatch} langAssumed={nowAttempt.langAssumed} />
+            {nowAttempt.audio && <span>{nowAttempt.audio}</span>}
+            {nowAttempt.size && <span>{nowAttempt.size}</span>}
+          </div>
+          <button
+            onClick={() => setPickerOpen(true)}
+            className="pointer-events-auto mt-2 flex items-center gap-1.5 rounded border border-white/40 px-2.5 py-1 text-xs font-bold transition-colors hover:border-white hover:bg-white/10"
+          >
+            <DownloadIcon size={13} /> Details &amp; download
+          </button>
+        </div>
+      )}
+
+      {/* "no sound?" hint */}
+      {noAudioHint && !fixOn && phase === 'ready' && !pickerOpen && (
+        <div className="absolute bottom-32 left-1/2 z-10 w-[min(92vw,470px)] -translate-x-1/2 animate-fadeInUp rounded-md border border-white/20 bg-black/90 p-4 shadow-2xl backdrop-blur">
+          <p className="font-bold">No sound?</p>
+          <p className="mt-1 text-sm text-white/70">
+            This file&apos;s audio format isn&apos;t supported by your browser. The audio fix keeps the picture as it is and converts only the sound.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button onClick={toggleFix} className="btn-white !px-4 !py-1.5 !text-sm">
+              <VolumeIcon size={16} /> Play with audio fix
+            </button>
+            <button
+              onClick={() => {
+                hintDismissedRef.current = true;
+                setNoAudioHint(false);
+              }}
+              className="btn-gray !px-4 !py-1.5 !text-sm"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* bottom controls */}
       {phase === 'ready' && (
@@ -761,26 +1244,26 @@ export default function Player({ spec, onClose, onNext }) {
         </div>
       )}
 
-      {/* source picker */}
-      {pickerOpen && spec.type !== 'raw' && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/85 px-4 animate-fadeIn" onMouseDown={(e) => e.target === e.currentTarget && setPickerOpen(false)}>
-          <div className="w-full max-w-[760px] animate-scaleIn rounded-lg bg-[#181818] p-5 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-xl font-bold">Choose a source</h3>
-              <button onClick={() => setPickerOpen(false)} className="text-sm text-[#b3b3b3] hover:text-white">
-                Close
-              </button>
-            </div>
-            <SourcePicker
-              spec={spec}
-              onPick={(source) => {
-                setPickerOpen(false);
-                setForced(source);
-                setAttempt((n) => n + 1);
-              }}
-            />
-          </div>
-        </div>
+      {/* sources: a side drawer, so the video keeps playing while it is open */}
+      {pickerOpen && (
+        <SourcesDrawer
+          spec={spec}
+          attempts={attempts}
+          preloaded={searched}
+          statusOf={statusOf}
+          onClose={() => setPickerOpen(false)}
+          onPick={(source) => {
+            setForced(source);
+            setAttempt((n) => n + 1);
+          }}
+          onPickFix={(source) => {
+            fixExplicitRef.current = true;
+            setForced(source);
+            setAttempt((n) => n + 1);
+          }}
+          onDownload={(source) => download(source, spec)}
+          onDownloadCurrent={downloadCurrent}
+        />
       )}
     </div>
   );

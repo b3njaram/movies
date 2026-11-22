@@ -152,6 +152,14 @@ export async function getTitle(type, id) {
   });
 }
 
+// The title as Spanish-language releases are named (e.g. "El Padrino" for "The Godfather").
+export async function getLocalizedTitle(type, id, language = 'es-MX') {
+  return cached(`title-loc:${language}:${type}:${id}`, 30 * 24 * 3600, async () => {
+    const d = await tmdbFetch(`/${type}/${id}`, { language });
+    return { title: d.title || d.name || null };
+  });
+}
+
 export async function getSeason(tvId, seasonNumber) {
   return cached(`season:${tvId}:${seasonNumber}`, 12 * 3600, async () => {
     const d = await tmdbFetch(`/tv/${tvId}/season/${seasonNumber}`);

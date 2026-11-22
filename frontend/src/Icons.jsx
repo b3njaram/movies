@@ -140,3 +140,9 @@ export const WarningIcon = (p) => (
     <circle cx="12" cy="17.2" r="0.5" fill="currentColor" />
   </S>
 );
+
+export const DownloadIcon = (p) => (
+  <S {...p} {...stroke} strokeWidth="2.2">
+    <path d="M12 3.5v12M6.5 10.5L12 16l5.5-5.5M4.5 20h15" />
+  </S>
+);

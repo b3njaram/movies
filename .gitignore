@@ -1,0 +1,10 @@
+# secrets and local data never go to GitHub
+.env
+.env.*
+!.env.example
+data/
+docker-compose.override.yml
+
+node_modules/
+*.log
+.DS_Store

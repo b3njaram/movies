@@ -31,6 +31,7 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
   const [name, setName] = useState(profile.name || '');
   const [avatar, setAvatar] = useState(profile.avatar ?? 0);
   const [kids, setKids] = useState(Boolean(profile.kids));
+  const [lang, setLangState] = useState(profile.lang === 'es' ? 'es' : 'en');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -38,7 +39,7 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
     setBusy(true);
     setError('');
     try {
-      const body = { name, avatar, kids };
+      const body = { name, avatar, kids, lang };
       if (isNew) await api('/api/profiles', { method: 'POST', body });
       else await api(`/api/profiles/${profile.id}`, { method: 'PUT', body });
       await onSaved();
@@ -88,6 +89,25 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
               />
             ))}
           </div>
+          <div className="mt-6">
+            <p className="mb-2 text-lg">Preferred audio language</p>
+            <div className="flex w-fit overflow-hidden rounded border border-[#808080]">
+              {[
+                ['en', 'English'],
+                ['es', 'Español'],
+              ].map(([code, label]) => (
+                <button
+                  key={code}
+                  onClick={() => setLangState(code)}
+                  aria-pressed={lang === code}
+                  className={`px-5 py-2 text-base transition-colors ${lang === code ? 'bg-white font-medium text-black' : 'text-[#b3b3b3] hover:bg-white/10'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-sm text-[#808080]">Releases in this language are listed and played first.</p>
+          </div>
           <label className="mt-6 flex cursor-pointer select-none items-center gap-3 text-lg">
             <input type="checkbox" checked={kids} onChange={(e) => setKids(e.target.checked)} className="h-5 w-5 accent-white" />
             Kids profile
@@ -127,7 +147,7 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
   );
 }
 
-export default function Profiles({ profiles, onSelect, onReload, onLogout, maxProfiles = 5, startInManage = false, onDone }) {
+export default function Profiles({ profiles, onSelect, onReload, onLogout, startInManage = false, onDone }) {
   const [manage, setManage] = useState(startInManage);
   const [editing, setEditing] = useState(null);
 
@@ -163,18 +183,16 @@ export default function Profiles({ profiles, onSelect, onReload, onLogout, maxPr
                 <ProfileTile key={p.id} profile={p} index={i} manage={manage} onClick={() => (manage ? setEditing(p) : onSelect(p))} />
               ))}
 
-              {profiles.length < maxProfiles && (
-                <button
-                  onClick={() => setEditing({ name: '', avatar: profiles.length % 8, kids: false })}
-                  className="group flex w-[84px] flex-col items-center gap-3 animate-fadeInUp sm:w-[120px] md:w-[150px] lg:w-[170px]"
-                  style={{ animationDelay: `${profiles.length * 70}ms` }}
-                >
-                  <div className="flex aspect-square w-full items-center justify-center rounded-md transition-all duration-200 group-hover:bg-white">
-                    <PlusIcon size={72} className="text-[#808080] transition-colors group-hover:text-black" />
-                  </div>
-                  <span className="text-sm text-[#808080] transition-colors group-hover:text-white sm:text-lg">Add Profile</span>
-                </button>
-              )}
+              <button
+                onClick={() => setEditing({ name: '', avatar: profiles.length % 8, kids: false, lang: 'en' })}
+                className="group flex w-[84px] flex-col items-center gap-3 animate-fadeInUp sm:w-[120px] md:w-[150px] lg:w-[170px]"
+                style={{ animationDelay: `${Math.min(profiles.length, 8) * 70}ms` }}
+              >
+                <div className="flex aspect-square w-full items-center justify-center rounded-md transition-all duration-200 group-hover:bg-white">
+                  <PlusIcon size={72} className="text-[#808080] transition-colors group-hover:text-black" />
+                </div>
+                <span className="text-sm text-[#808080] transition-colors group-hover:text-white sm:text-lg">Add Profile</span>
+              </button>
             </div>
 
             <div className="mt-14 flex gap-4">

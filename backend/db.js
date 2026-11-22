@@ -89,6 +89,14 @@ db.exec(`
   );
 `);
 
+// Preferred language of the audio ('en' | 'es'), per profile. Added after the first release,
+// so existing databases get the column here (no-op once it exists).
+try {
+  db.exec("ALTER TABLE profiles ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'");
+} catch {
+  /* column already exists */
+}
+
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------
@@ -105,18 +113,16 @@ export function createUser(username, passwordHash) {
 // Profiles
 // ---------------------------------------------------------------------------
 
-export const MAX_PROFILES = 5;
-
 export function listProfiles(userId) {
   return db
-    .prepare('SELECT id, name, avatar, kids FROM profiles WHERE user_id = ? ORDER BY id')
+    .prepare('SELECT id, name, avatar, kids, lang FROM profiles WHERE user_id = ? ORDER BY id')
     .all(userId)
     .map((p) => ({ ...p, kids: !!p.kids }));
 }
 
 export function getProfile(userId, profileId) {
   const p = db
-    .prepare('SELECT id, name, avatar, kids FROM profiles WHERE id = ? AND user_id = ?')
+    .prepare('SELECT id, name, avatar, kids, lang FROM profiles WHERE id = ? AND user_id = ?')
     .get(profileId, userId);
   return p ? { ...p, kids: !!p.kids } : null;
 }
@@ -144,18 +150,19 @@ export function ensureDefaultProfile(user) {
   return listProfiles(user.id);
 }
 
-export function createProfile(userId, { name, avatar, kids }) {
+export function createProfile(userId, { name, avatar, kids, lang }) {
   const info = db
-    .prepare('INSERT INTO profiles (user_id, name, avatar, kids) VALUES (?, ?, ?, ?)')
-    .run(userId, name, avatar, kids ? 1 : 0);
+    .prepare('INSERT INTO profiles (user_id, name, avatar, kids, lang) VALUES (?, ?, ?, ?, ?)')
+    .run(userId, name, avatar, kids ? 1 : 0, lang === 'es' ? 'es' : 'en');
   return getProfile(userId, Number(info.lastInsertRowid));
 }
 
-export function updateProfile(userId, profileId, { name, avatar, kids }) {
-  db.prepare('UPDATE profiles SET name = ?, avatar = ?, kids = ? WHERE id = ? AND user_id = ?').run(
+export function updateProfile(userId, profileId, { name, avatar, kids, lang }) {
+  db.prepare('UPDATE profiles SET name = ?, avatar = ?, kids = ?, lang = ? WHERE id = ? AND user_id = ?').run(
     name,
     avatar,
     kids ? 1 : 0,
+    lang === 'es' ? 'es' : 'en',
     profileId,
     userId
   );

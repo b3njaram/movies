@@ -7,7 +7,9 @@ services:
       - PGID=1000
       - TZ=Etc/UTC
     volumes:
-      - /home/osvaldoramirez/movies/data/prowlarr:/config
+      # Defaults to a folder inside this project. If Prowlarr already lives somewhere else, set
+      # PROWLARR_CONFIG_DIR (absolute path) in .env so its indexers and API key are kept.
+      - ${PROWLARR_CONFIG_DIR:-./data/prowlarr}:/config
     ports:
       - "9696:9696"
     restart: unless-stopped
@@ -16,7 +18,7 @@ services:
     image: yourok/torrserver:latest
     container_name: torrserver
     volumes:
-      - /home/osvaldoramirez/movies/data/torrserver:/opt/ts/config
+      - ${TORRSERVER_CONFIG_DIR:-./data/torrserver}:/opt/ts/config
     restart: unless-stopped
 
   backend:
@@ -31,7 +33,7 @@ services:
       - DB_PATH=/app/data/streamhub.db
       - TMDB_API_KEY=${TMDB_API_KEY:-}
     volumes:
-      - ./data/app:/app/data
+      - ./data/app:/app/data   # accounts, profiles, watch history, My List
     depends_on:
       - prowlarr
       - torrserver
@@ -41,7 +43,7 @@ services:
     build: ./frontend
     container_name: streamhub-frontend
     ports:
-      - "3111:80"
+      - "${HTTP_PORT:-3111}:80"
     depends_on:
       - backend
     restart: unless-stopped

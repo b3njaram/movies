@@ -1,3 +1,5 @@
+import { spawn } from 'child_process';
+import { Readable } from 'stream';
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -9,7 +11,6 @@ import {
   updateProfile,
   deleteProfile,
   listProfiles,
-  MAX_PROFILES,
   upsertProgress,
   getProgressByKey,
   getTitleProgress,
@@ -30,8 +31,9 @@ import {
   getFirstEpisode,
   getEpisodeName,
   searchTitles,
+  getLocalizedTitle,
 } from './tmdb.js';
-import { searchSources, lookupRef, bytesToSize } from './sources.js';
+import { searchSources, lookupRef, bytesToSize, describeRelease } from './sources.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
 const PROWLARR_API_KEY = process.env.PROWLARR_API_KEY || '';
@@ -110,7 +112,7 @@ function cleanProfileInput(body) {
   const name = String(body?.name || '').trim().slice(0, 20);
   if (!name) throw httpError(400, 'Please enter a name for the profile.');
   const avatar = Math.min(7, Math.max(0, parseInt(body?.avatar, 10) || 0));
-  return { name, avatar, kids: Boolean(body?.kids) };
+  return { name, avatar, kids: Boolean(body?.kids), lang: body?.lang === 'es' ? 'es' : 'en' };
 }
 
 app.get('/api/profiles', (req, res) => {
@@ -118,9 +120,6 @@ app.get('/api/profiles', (req, res) => {
 });
 
 app.post('/api/profiles', (req, res) => {
-  if (listProfiles(req.user.id).length >= MAX_PROFILES) {
-    throw httpError(400, `You can have up to ${MAX_PROFILES} profiles.`);
-  }
   res.json({ profile: createProfile(req.user.id, cleanProfileInput(req.body)) });
 });
 
@@ -266,9 +265,22 @@ app.get('/api/sources', withProfile, wrap(async (req, res) => {
   const { type, title, year, q } = req.query;
   if (!q && !title) throw httpError(400, 'Missing title');
   if (req.profile.kids && !title) throw httpError(403, 'Direct indexer search is turned off for Kids profiles.');
-  const results = await searchSources({
+  // Spanish releases carry the Spanish title, so look that up when the profile prefers Spanish.
+  let altTitles = [];
+  const tmdbId = parseInt(req.query.tmdbId, 10);
+  if (req.profile.lang === 'es' && title && validType(type) && tmdbId && tmdbEnabled()) {
+    try {
+      const loc = await getLocalizedTitle(type, tmdbId, 'es-MX');
+      if (loc.title) altTitles = [loc.title];
+    } catch {
+      /* searching with the original title still works */
+    }
+  }
+  const { results, skipped } = await searchSources({
     prowlarrUrl: PROWLARR_URL,
     apiKey: PROWLARR_API_KEY,
+    lang: req.profile.lang,
+    altTitles,
     type: validType(type),
     title: title ? String(title) : undefined,
     year: year ? String(year) : undefined,
@@ -276,7 +288,7 @@ app.get('/api/sources', withProfile, wrap(async (req, res) => {
     episode: req.query.episode !== undefined ? Number(req.query.episode) : undefined,
     q: q ? String(q) : undefined,
   });
-  res.json({ results });
+  res.json({ results, skipped, lang: req.profile.lang, altTitles });
 }));
 
 // ---------------------------------------------------------------------------
@@ -330,11 +342,12 @@ async function fetchTorrentOrMagnet(url) {
     current.host = base.host;
   }
 
+  const overall = AbortSignal.timeout(25000); // all hops together, so one request never nears Cloudflare's 100 s limit
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetch(current, {
       redirect: 'manual',
       headers: { 'X-Api-Key': PROWLARR_API_KEY },
-      signal: AbortSignal.timeout(25000),
+      signal: overall,
     }).catch((e) => {
       throw httpError(502, `Could not download the torrent file (${e.message})`);
     });
@@ -355,7 +368,7 @@ async function fetchTorrentOrMagnet(url) {
 
 async function addToTorrServer(resolved) {
   if (resolved.kind === 'magnet') {
-    return tsPost('/torrents', { action: 'add', link: resolved.value, save_to_db: false }, 60000);
+    return tsPost('/torrents', { action: 'add', link: resolved.value, save_to_db: false }, 40000);
   }
   const form = new FormData();
   form.append('save', 'false');
@@ -365,7 +378,7 @@ async function addToTorrServer(resolved) {
     res = await fetch(`${TORRSERVER_URL}/torrent/upload`, {
       method: 'POST',
       body: form,
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(40000),
     });
   } catch (e) {
     throw httpError(502, `TorrServer is not reachable (${e.message})`);
@@ -374,7 +387,7 @@ async function addToTorrServer(resolved) {
   return res.json();
 }
 
-async function waitForFiles(hash, tries = 25) {
+async function waitForFiles(hash, tries = 20) {
   for (let i = 0; i < tries; i++) {
     const info = await tsPost('/torrents', { action: 'get', hash }).catch(() => null);
     if (info?.file_stats?.length) return info;
@@ -433,6 +446,8 @@ app.post('/api/stream', withProfile, wrap(async (req, res) => {
     fileSize: bytesToSize(file.length),
     // Stored so "Continue Watching" can reconnect to exactly this torrent later.
     magnet: originalMagnet || `magnet:?xt=urn:btih:${hash}`,
+    torrentName: info.title || baseName,
+    release: describeRelease(info.title || baseName),
     streamUrl: `/stream/${encodeURIComponent(baseName)}?link=${hash}&index=${file.id}&play`,
   });
 }));
@@ -448,6 +463,220 @@ app.get('/api/stats/:hash', wrap(async (req, res) => {
     seeders: s.connected_seeders ?? 0,
     downloadSpeed: s.download_speed ?? 0,
   });
+}));
+
+// ---------------------------------------------------------------------------
+// Audio fix: browsers (Firefox above all) cannot decode AC3 / E-AC3 / DTS / TrueHD, so a
+// release plays picture-only. We keep the video untouched (stream copy, almost no CPU) and
+// re-encode just the audio track to AAC with ffmpeg, as a fragmented MP4 piped straight to
+// the browser. Seeking works by restarting the stream at an offset (see ?t=).
+// ---------------------------------------------------------------------------
+
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
+const MAX_AUDIOFIX = Number(process.env.MAX_AUDIOFIX || 3);
+const SAFE_AUDIO = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac']);
+const MISSING_FFMPEG = 'ffmpeg is not installed in the backend container. Rebuild it with: docker compose up -d --build';
+let activeFixes = 0;
+const probeCache = new Map();
+
+// Hash + 1-based file index (as TorrServer numbers them). Validated so nothing else can reach ffmpeg.
+function fileRef(req) {
+  const hash = String(req.query.hash || '');
+  const index = parseInt(req.query.index, 10);
+  if (!/^[a-f0-9]{40}$/i.test(hash) || !Number.isInteger(index) || index < 1 || index > 100000) {
+    throw httpError(400, 'Bad file reference.');
+  }
+  return { hash: hash.toLowerCase(), index };
+}
+
+const torrentFileUrl = (hash, index) => `${TORRSERVER_URL}/stream/video?link=${hash}&index=${index}&play`;
+
+function runProbe(url) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-analyzeduration', '8000000', '-probesize', '8000000', url], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      p.kill('SIGKILL');
+      reject(httpError(504, 'Timed out reading the file. Are there peers for this torrent?'));
+    }, 45000);
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', (e) => {
+      clearTimeout(timer);
+      reject(httpError(500, e.code === 'ENOENT' ? MISSING_FFMPEG : `ffprobe failed: ${e.message}`));
+    });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(httpError(502, `Could not read the media file${err ? `: ${err.trim().split('\n').pop()}` : ''}`));
+      try {
+        resolve(JSON.parse(out));
+      } catch {
+        reject(httpError(502, 'Unreadable ffprobe output.'));
+      }
+    });
+  });
+}
+
+function summarizeProbe(info) {
+  const streams = info.streams || [];
+  const video = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic);
+  const tracks = streams
+    .filter((s) => s.codec_type === 'audio')
+    .map((a, ord) => ({
+      ord,
+      codec: a.codec_name || 'unknown',
+      channels: a.channels || 2,
+      lang: a.tags?.language || null,
+      title: a.tags?.title || null,
+      isDefault: Boolean(a.disposition?.default),
+    }));
+  const defaultTrack = tracks.find((t) => t.isDefault)?.ord ?? 0;
+  const videoCodec = video?.codec_name || null;
+
+  let reason = null;
+  if (!video) reason = 'This file has no video track.';
+  else if (videoCodec !== 'h264') {
+    reason = `This file uses ${String(videoCodec).toUpperCase()} video, which many browsers cannot play. The audio fix only repairs sound, so please choose another source.`;
+  } else if (!tracks.length) reason = 'This file has no audio track.';
+
+  return {
+    duration: parseFloat(info.format?.duration) || parseFloat(video?.duration) || 0,
+    videoCodec,
+    tracks,
+    defaultTrack,
+    canFix: reason === null,
+    needsFix: tracks.length > 0 && !SAFE_AUDIO.has(tracks[defaultTrack]?.codec),
+    reason,
+  };
+}
+
+app.get('/api/audiofix/probe', wrap(async (req, res) => {
+  const { hash, index } = fileRef(req);
+  touch(hash);
+  const key = `${hash}:${index}`;
+  let hit = probeCache.get(key);
+  if (!hit || Date.now() - hit.at > 30 * 60 * 1000) {
+    hit = { at: Date.now(), data: summarizeProbe(await runProbe(torrentFileUrl(hash, index))) };
+    probeCache.set(key, hit);
+    if (probeCache.size > 200) probeCache.delete(probeCache.keys().next().value);
+  }
+  res.json(hit.data);
+}));
+
+app.get('/api/audiofix/stream', wrap(async (req, res) => {
+  const { hash, index } = fileRef(req);
+  const start = Math.min(Math.max(parseFloat(req.query.t) || 0, 0), 172800);
+  const track = Math.min(Math.max(parseInt(req.query.a, 10) || 0, 0), 31);
+  if (activeFixes >= MAX_AUDIOFIX) throw httpError(503, 'Too many audio-fix streams are running. Close another player and try again.');
+  touch(hash);
+
+  const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5'];
+  // -noaccurate_seek keeps the copied video and the re-encoded audio starting at the same point.
+  if (start > 0) args.push('-noaccurate_seek', '-ss', String(start));
+  args.push(
+    '-i', torrentFileUrl(hash, index),
+    '-map', '0:v:0', '-map', `0:a:${track}?`, '-sn', '-dn',
+    '-c:v', 'copy',
+    '-c:a', 'aac', '-b:a', '192k', '-ac', '2',
+    '-af', 'aresample=async=1:first_pts=0',
+    '-avoid_negative_ts', 'make_zero',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    '-f', 'mp4', 'pipe:1'
+  );
+
+  activeFixes += 1;
+  let counted = true;
+  const release = () => {
+    if (counted) {
+      counted = false;
+      activeFixes -= 1;
+    }
+  };
+
+  const ff = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let started = false;
+  let stderr = '';
+  const heartbeat = setInterval(() => touch(hash), 60000);
+
+  ff.stderr.on('data', (d) => {
+    stderr = (stderr + d).slice(-2000);
+  });
+  ff.on('error', (e) => {
+    release();
+    if (!res.headersSent) res.status(500).json({ error: e.code === 'ENOENT' ? MISSING_FFMPEG : e.message });
+    else res.destroy();
+  });
+  ff.on('close', (code) => {
+    release();
+    if (!started && !res.headersSent) {
+      res.status(502).json({ error: `Audio fix failed: ${stderr.trim().split('\n').pop() || `ffmpeg exited with code ${code}`}` });
+    } else if (!res.writableEnded) res.end();
+  });
+  ff.stdout.on('data', (chunk) => {
+    if (!started) {
+      started = true;
+      res.status(200);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Accept-Ranges', 'none');
+      res.setHeader('X-Accel-Buffering', 'no');
+    }
+    if (!res.write(chunk)) {
+      ff.stdout.pause();
+      res.once('drain', () => ff.stdout.resume());
+    }
+  });
+  // The browser closing the connection (seek, stop, leave page) must stop ffmpeg right away.
+  res.on('close', () => {
+    clearInterval(heartbeat);
+    ff.kill('SIGKILL');
+  });
+}));
+
+// ---------------------------------------------------------------------------
+// Download a file to the viewer's own device. The browser asks for it with a normal link, so
+// the server streams the bytes with "Content-Disposition: attachment" and honours Range, which
+// lets browsers resume an interrupted download.
+// ---------------------------------------------------------------------------
+
+app.get('/api/download', wrap(async (req, res) => {
+  const { hash, index } = fileRef(req);
+  const rawName = String(req.query.name || 'video.mkv').split(/[\\/]/).pop().trim();
+  const name = rawName.replace(/[\u0000-\u001f"]/g, '').slice(0, 200) || 'video.mkv';
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_');
+
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
+  const headers = {};
+  if (req.headers.range) headers.Range = req.headers.range;
+
+  const upstream = await fetch(`${TORRSERVER_URL}/stream/${encodeURIComponent(name)}?link=${hash}&index=${index}&play`, {
+    headers,
+    signal: controller.signal,
+  });
+  if (upstream.status !== 200 && upstream.status !== 206) throw httpError(502, `TorrServer answered HTTP ${upstream.status} for this file.`);
+
+  res.status(upstream.status);
+  for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+    const v = upstream.headers.get(h);
+    if (v) res.setHeader(h, v);
+  }
+  res.setHeader('Content-Disposition', `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  // Keep the torrent alive for as long as the download runs (the idle cleanup would otherwise drop it).
+  touch(hash);
+  const heartbeat = setInterval(() => touch(hash), 60000);
+  res.on('close', () => clearInterval(heartbeat));
+
+  Readable.fromWeb(upstream.body)
+    .on('error', () => res.destroy())
+    .pipe(res);
 }));
 
 // Drop torrents nobody has touched for a while (frontend polls /stats while playing).
@@ -604,6 +833,11 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    // e.g. the viewer closed a download/stream mid-way: nothing left to tell them.
+    if (!res.writableEnded) res.end();
+    return;
+  }
   const status = err.status && err.status !== 401 ? err.status : err.status === 401 ? 502 : 500;
   if (status >= 500) console.error(`[${req.method} ${req.path}]`, err.message);
   res.status(status).json({ error: err.message || 'Something went wrong.', code: err.code });

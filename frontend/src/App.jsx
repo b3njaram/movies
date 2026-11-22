@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, setProfileId, getProfileId } from './api';
+import { api, setProfileId, getProfileId, BASE } from './api';
 import { AppContext } from './context';
 import { specFromItem } from './utils';
 import Logo from './Logo';
@@ -249,6 +249,50 @@ export default function App() {
     );
   }, []);
 
+  // Preferred audio language of the current profile ('en' | 'es'). Saved on the server so it follows
+  // the profile to every device; it changes how sources are ranked, never what is already playing.
+  const setLang = useCallback(
+    async (lang) => {
+      if (!profile || profile.lang === lang) return;
+      const before = profile;
+      const after = { ...profile, lang };
+      setProfile(after);
+      setProfiles((list) => list.map((p) => (p.id === after.id ? after : p)));
+      try {
+        await api(`/api/profiles/${after.id}`, { method: 'PUT', body: { name: after.name, avatar: after.avatar, kids: after.kids, lang } });
+        notify(lang === 'es' ? 'Preferred audio language: Español' : 'Preferred audio language: English');
+      } catch (e) {
+        setProfile(before);
+        setProfiles((list) => list.map((p) => (p.id === before.id ? before : p)));
+        notify(e.message);
+      }
+    },
+    [profile, notify]
+  );
+
+  // Download one release to the device that is watching: register it with TorrServer (finds the right
+  // file, e.g. the requested episode inside a season pack), then let the browser fetch it as a normal
+  // file download. If anything is wrong the user is told before the download starts.
+  const download = useCallback(
+    async (source, spec = {}) => {
+      try {
+        notify('Preparing download\u2026');
+        const d = await api('/api/stream', { method: 'POST', body: { link: source.link, season: spec.season, episode: spec.episode } });
+        const url = `${BASE}/api/download?hash=${d.hash}&index=${d.fileIndex}&name=${encodeURIComponent(d.fileName)}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = d.fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        notify(`Downloading ${d.fileName} (${d.fileSize})`);
+      } catch (e) {
+        notify(e.message);
+      }
+    },
+    [notify]
+  );
+
   // ------------------------------------------------------------------
   // My List
   // ------------------------------------------------------------------
@@ -274,8 +318,8 @@ export default function App() {
   );
 
   const ctx = useMemo(
-    () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify }),
-    [profile, myList, inList, toggleList, openTitle, play, playTitle, notify]
+    () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang }),
+    [profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang]
   );
 
   const nav = (id) => {

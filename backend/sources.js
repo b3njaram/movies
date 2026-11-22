@@ -65,6 +65,81 @@ export function titleMatches(releaseTitle, variants, year) {
 // Release parsing + scoring
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Audio language, read from the release name.
+// Only the part AFTER the title/year is inspected (so a film called "Spa Night" is not "Spanish"),
+// and subtitle-only tags ("ENG SUBS", "VOSTFR") do not count as audio.
+// ---------------------------------------------------------------------------
+
+const LANG_RULES = [
+  ['es-lat', /\b(latino|latin|latam|lat|es (la|mx|419)|spa lat)\b/],
+  ['es-esp', /\b(castellano|es es|spain|iberico)\b/],
+  ['es', /\b(spanish|espanol|esp|spa)\b/],
+  ['en', /\b(english|eng|ingles)\b/],
+  ['fr', /\b(french|truefrench|vff|vfq|vfi|vf|fre|fra)\b/],
+  ['de', /\b(german|deutsch|ger|deu)\b/],
+  ['it', /\b(italian|ita)\b/],
+  ['pt', /\b(portuguese|portugues|dublado|ptbr|pt br|por)\b/],
+  ['ru', /\b(russian|rus)\b/],
+  ['hi', /\b(hindi|hin)\b/],
+  ['ja', /\b(japanese|jpn|jap)\b/],
+  ['ko', /\b(korean|kor)\b/],
+  ['zh', /\b(chinese|mandarin|cantonese|chi|zho)\b/],
+  ['pl', /\b(polish|pol|lektor)\b/],
+  ['tr', /\b(turkish|tur)\b/],
+];
+const LANG_ORDER = ['en', 'es', 'es-lat', 'es-esp', 'fr', 'de', 'it', 'pt', 'ru', 'hi', 'ja', 'ko', 'zh', 'pl', 'tr', 'multi'];
+const LANG_LABEL = {
+  en: 'EN', es: 'ES', 'es-lat': 'ES\u00b7LAT', 'es-esp': 'ES\u00b7ESP', fr: 'FR', de: 'DE', it: 'IT', pt: 'PT',
+  ru: 'RU', hi: 'HI', ja: 'JA', ko: 'KO', zh: 'ZH', pl: 'PL', tr: 'TR', multi: 'MULTI',
+};
+
+export function parseLanguages(name) {
+  const spaced = ` ${String(name || '').toLowerCase().replace(/[._\-+[\](){}]+/g, ' ').replace(/\s+/g, ' ')} `;
+  const marker = /\b(19\d\d|20\d\d)\b|\bs\d{1,2}(e\d{1,3})?\b|\b(2160p|1080[pi]|720p|480p|576p)\b/.exec(spaced);
+  let tail = marker ? spaced.slice(marker.index) : spaced;
+
+  // language words that belong to SUBTITLES, not to the sound
+  tail = tail
+    .replace(/\b\w+ (subs?|subbed|subtitles?)\b/g, ' ')
+    .replace(/\b(subs?|subbed|subtitles?) \w+\b/g, ' ')
+    .replace(/\b(vostfr|vose|vosta|vost|multisubs?|msubs?|esubs?|hc)\b/g, ' ');
+
+  const found = new Set();
+  for (const [code, re] of LANG_RULES) if (re.test(tail)) found.add(code);
+  if (found.has('es-lat') || found.has('es-esp')) found.delete('es'); // the specific kind wins
+
+  const dual = /\b(dual|dualaudio)\b/.test(tail);
+  const multi = /\bmulti(audio|lang)?\b/.test(tail);
+  if (dual) found.add('en'); // "Dual" pairs the original (English) track with a local dub
+  let assumed = false;
+  if (!found.size) {
+    if (multi) found.add('multi');
+    else {
+      found.add('en'); // nothing stated: scene releases of Western titles are English
+      assumed = true;
+    }
+  }
+  const languages = LANG_ORDER.filter((l) => found.has(l));
+  return { languages, langAssumed: assumed, langLabel: languages.map((l) => LANG_LABEL[l]).join('+') };
+}
+
+// How well a release's audio fits the viewer's preferred language ('en' | 'es').
+export function languageFit(p, pref) {
+  const hasEn = p.languages.includes('en');
+  const hasEs = p.languages.some((l) => l.startsWith('es'));
+  const multi = p.languages.includes('multi');
+  if (pref === 'es') {
+    if (hasEs) return { score: 100 + (p.languages.includes('es-lat') ? 10 : 0), match: 'preferred' };
+    if (multi) return { score: 20, match: 'ok' };
+    if (hasEn) return { score: p.langAssumed ? -20 : -30, match: 'ok' };
+    return { score: -120, match: 'other' };
+  }
+  if (hasEn) return { score: p.langAssumed ? 25 : 35, match: p.langAssumed ? 'ok' : 'preferred' };
+  if (multi) return { score: 5, match: 'ok' };
+  return { score: hasEs ? -90 : -120, match: 'other' };
+}
+
 export function parseRelease(name) {
   const t = String(name || '').toLowerCase();
 
@@ -77,8 +152,18 @@ export function parseRelease(name) {
   const hevc = /\b(x265|h[ .]?265|hevc)\b/.test(t);
   const av1 = /\bav1\b/.test(t);
   const h264 = /\b(x264|h[ .]?264|avc)\b/.test(t);
-  const surround = /\b(ac3|dd5|ddp|dd\+|eac3|e-ac-3|dts|truehd|atmos)/.test(t);
-  const aac = /\baac/.test(t);
+  const surround = /\b(ac3|e-?ac-?3|dd[p+]?\d|dd\+|ddp|dts|truehd|atmos)/.test(t);
+  const aac = /\b(aac|opus|mp3)/.test(t); // audio every browser can decode
+
+  let audio = null;
+  if (/\batmos\b/.test(t)) audio = 'Atmos';
+  else if (/\btruehd\b/.test(t)) audio = 'TrueHD';
+  else if (/\bdts/.test(t)) audio = 'DTS';
+  else if (/\b(e-?ac-?3|ddp|dd\+|dd[p+]\d)/.test(t)) audio = 'DD+';
+  else if (/\b(ac3|dd\d)/.test(t)) audio = 'AC3';
+  else if (/\baac/.test(t)) audio = 'AAC';
+  else if (/\bopus\b/.test(t)) audio = 'Opus';
+  else if (/\bmp3\b/.test(t)) audio = 'MP3';
   const remux = /\bremux\b/.test(t);
   const hdr = /\b(hdr10?\+?|dolby[ .]?vision|dv)\b/.test(t);
 
@@ -106,7 +191,9 @@ export function parseRelease(name) {
     }
   }
 
-  return { quality, hevc, av1, h264, surround, aac, remux, hdr, source, season, episode, pack, packSeason };
+  const lang = parseLanguages(name);
+
+  return { quality, hevc, av1, h264, surround, aac, audio, remux, hdr, source, season, episode, pack, packSeason, ...lang };
 }
 
 export function scoreRelease(p, seeders, sizeBytes, want = {}) {
@@ -116,8 +203,10 @@ export function scoreRelease(p, seeders, sizeBytes, want = {}) {
   if (p.source === 'WEB' || p.source === 'BluRay') s += 8;
   if (p.hevc) s -= 28;
   if (p.av1) s -= 40;
-  if (p.aac) s += 14;
-  if (p.surround) s -= 22;
+  // Browsers (Firefox especially) cannot decode AC3/E-AC3/DTS/TrueHD, which shows up as "no sound".
+  // AAC is strongly preferred; it outweighs roughly a 5x seeder advantage.
+  if (p.aac) s += 45;
+  if (p.surround) s -= 35;
   if (p.remux) s -= 40;
 
   const gb = (sizeBytes || 0) / 1024 ** 3;
@@ -125,6 +214,7 @@ export function scoreRelease(p, seeders, sizeBytes, want = {}) {
     if (gb > 25) s -= 25;
     if (gb > 0 && gb < 0.5) s -= 15;
   }
+  s += languageFit(p, want.lang === 'es' ? 'es' : 'en').score;
   if (seeders < 1) s -= 1000;
   else if (seeders < 3) s -= 15;
 
@@ -152,55 +242,147 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
-function buildQueries({ type, title, year, season, episode, q }) {
+function buildQueries({ type, title, altTitles = [], year, season, episode, q }) {
   if (q) return [q];
   const variants = titleVariants(title);
   const shortTitle = variants[variants.length - 1];
   const names = [title];
   if (shortTitle && normalize(title) !== shortTitle) names.push(shortTitle);
+  // Spanish releases are named with the Spanish title, so those get searched for too
+  for (const alt of altTitles) if (alt && !names.some((n) => normalize(n) === normalize(alt))) names.push(alt);
 
   if (type === 'movie') return names.map((n) => `${n} ${year || ''}`.trim());
   const sxx = `S${pad(season ?? 1)}`;
-  if (episode == null) return [`${title} ${sxx}`];
-  return [`${title} ${sxx}E${pad(episode)}`, `${title} ${sxx}`];
+  const bases = [title, ...altTitles.filter((a) => a && normalize(a) !== normalize(title))];
+  if (episode == null) return bases.map((n) => `${n} ${sxx}`);
+  return bases.flatMap((n) => [`${n} ${sxx}E${pad(episode)}`, `${n} ${sxx}`]);
 }
 
 function magnetFromHash(hash, name) {
   return `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(name || hash)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Asking Prowlarr. One call across ALL indexers is only as fast as the slowest one (indexers behind
+// FlareSolverr can take a minute), which can push a single request past Cloudflare's 100 second
+// limit. So each indexer is searched on its own with a short timeout; whatever answered in time is
+// used and the rest are reported as "skipped".
+// ---------------------------------------------------------------------------
+
+const PER_INDEXER_MS = Number(process.env.INDEXER_TIMEOUT_MS || 25000);
+const TOTAL_MS = Number(process.env.SEARCH_TOTAL_MS || 40000);
+const CONCURRENCY = 8;
+let indexerCache = { at: 0, url: '', list: null };
+
+const keyError = () =>
+  httpError(
+    502,
+    'Prowlarr rejected the API key. Check PROWLARR_API_KEY in your .env against Settings → General in Prowlarr.',
+    'PROWLARR_KEY'
+  );
+
+async function listIndexers(prowlarrUrl, apiKey) {
+  if (indexerCache.list && indexerCache.url === prowlarrUrl && Date.now() - indexerCache.at < 60 * 1000) return indexerCache.list;
+  let res;
+  try {
+    res = await fetch(`${prowlarrUrl}/api/v1/indexer`, { headers: { 'X-Api-Key': apiKey }, signal: AbortSignal.timeout(10000) });
+  } catch (e) {
+    throw httpError(502, `Could not reach Prowlarr (${e.message})`);
+  }
+  if (res.status === 401 || res.status === 403) throw keyError();
+  if (!res.ok) return null; // unusual Prowlarr: fall back to one combined search
+  const all = await res.json();
+  const list = all
+    .filter((i) => i.enable !== false && (!i.protocol || i.protocol === 'torrent'))
+    .map((i) => ({ id: i.id, name: i.name || `#${i.id}` }));
+  indexerCache = { at: Date.now(), url: prowlarrUrl, list };
+  return list;
+}
+
+async function prowlarrSearch(prowlarrUrl, apiKey, query, category, indexerId, timeoutMs) {
+  const only = indexerId != null ? `&indexerIds=${indexerId}` : '';
+  const res = await fetch(`${prowlarrUrl}/api/v1/search?query=${encodeURIComponent(query)}&type=search&limit=100${category}${only}`, {
+    headers: { 'X-Api-Key': apiKey },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (res.status === 401 || res.status === 403) throw keyError();
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function runPool(tasks, limit) {
+  const out = new Array(tasks.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= tasks.length) return;
+        try {
+          out[i] = { ok: true, value: await tasks[i]() };
+        } catch (error) {
+          out[i] = { ok: false, error };
+        }
+      }
+    })
+  );
+  return out;
+}
+
 export async function searchSources({ prowlarrUrl, apiKey, ...want }) {
   const queries = buildQueries(want);
   const category = want.type === 'movie' ? '&categories=2000' : want.type === 'tv' ? '&categories=5000' : '';
+  const deadline = Date.now() + TOTAL_MS;
 
-  const responses = await Promise.all(
-    queries.map(async (query) => {
-      let res;
-      try {
-        res = await fetch(
-          `${prowlarrUrl}/api/v1/search?query=${encodeURIComponent(query)}&type=search&limit=100${category}`,
-          { headers: { 'X-Api-Key': apiKey }, signal: AbortSignal.timeout(60000) }
-        );
-      } catch (e) {
-        throw httpError(502, `Could not reach Prowlarr (${e.message})`);
-      }
-      if (res.status === 401 || res.status === 403) {
-        throw httpError(
-          502,
-          'Prowlarr rejected the API key. Check PROWLARR_API_KEY in your .env against Settings → General in Prowlarr.',
-          'PROWLARR_KEY'
-        );
-      }
-      if (!res.ok) throw httpError(502, `Prowlarr error (HTTP ${res.status})`);
-      return res.json();
-    })
-  );
+  let raws = [];
+  let skipped = [];
+  const indexers = await listIndexers(prowlarrUrl, apiKey);
+
+  if (indexers === null) {
+    try {
+      raws = (await Promise.all(queries.map((q) => prowlarrSearch(prowlarrUrl, apiKey, q, category, null, TOTAL_MS)))).flat();
+    } catch (e) {
+      if (e.code === 'PROWLARR_KEY') throw e;
+      throw httpError(502, `Prowlarr did not answer in time (${e.message})`);
+    }
+  } else {
+    if (!indexers.length) throw httpError(404, 'No torrent indexers are enabled in Prowlarr. Add or enable one in Prowlarr → Indexers.');
+    const jobs = indexers.flatMap((ix) => queries.map((q) => ({ ix, q })));
+    const outcomes = await runPool(
+      jobs.map((j) => async () => {
+        const left = deadline - Date.now();
+        if (left < 500) throw new Error('out of time');
+        return prowlarrSearch(prowlarrUrl, apiKey, j.q, category, j.ix.id, Math.min(PER_INDEXER_MS, left));
+      }),
+      CONCURRENCY
+    );
+
+    const bad = outcomes.find((o) => !o.ok && o.error.code === 'PROWLARR_KEY');
+    if (bad) throw bad.error;
+
+    const answered = new Set();
+    const failed = new Set();
+    outcomes.forEach((o, i) => {
+      if (o.ok) {
+        raws.push(...o.value);
+        answered.add(jobs[i].ix.name);
+      } else failed.add(jobs[i].ix.name);
+    });
+    skipped = [...failed].filter((n) => !answered.has(n));
+    if (!answered.size) {
+      throw httpError(
+        504,
+        `None of your indexers answered within ${Math.round(PER_INDEXER_MS / 1000)} seconds (${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? '…' : ''}). Check them in Prowlarr → Indexers, or try again.`
+      );
+    }
+  }
 
   const seen = new Set();
-  const variants = want.title ? titleVariants(want.title) : [];
+  const variants = want.title ? [...new Set([...titleVariants(want.title), ...(want.altTitles || []).flatMap(titleVariants)])] : [];
+  const pref = want.lang === 'es' ? 'es' : 'en';
   const out = [];
 
-  for (const raw of responses.flat()) {
+  for (const raw of raws) {
     if (raw.protocol && raw.protocol !== 'torrent') continue;
     const dedupeKey = raw.infoHash || raw.guid || `${raw.title}:${raw.size}`;
     if (seen.has(dedupeKey)) continue;
@@ -221,7 +403,8 @@ export async function searchSources({ prowlarrUrl, apiKey, ...want }) {
       if (wrongEpisode || wrongPack) continue;
     }
     const seeders = raw.seeders ?? 0;
-    const score = want.type ? scoreRelease(parsed, seeders, raw.size, want) : seeders;
+    const score = want.type ? scoreRelease(parsed, seeders, raw.size, { ...want, lang: pref }) : seeders;
+    const fit = languageFit(parsed, pref);
 
     out.push({
       id: dedupeKey,
@@ -238,12 +421,35 @@ export async function searchSources({ prowlarrUrl, apiKey, ...want }) {
       codec: parsed.hevc ? 'HEVC' : parsed.av1 ? 'AV1' : parsed.h264 ? 'H.264' : null,
       hdr: parsed.hdr,
       pack: parsed.pack,
-      // Chrome/Firefox/Safari can't decode HEVC/AV1 everywhere, and most can't play AC3/DTS audio.
+      audio: parsed.audio,
+      lang: parsed.langLabel,
+      langs: parsed.languages,
+      langAssumed: parsed.langAssumed,
+      langMatch: fit.match,
+      // HEVC/AV1 video often will not play in a browser (the audio fix cannot help with that)...
+      videoRisk: parsed.hevc || parsed.av1,
+      // ...while AC3/E-AC3/DTS/TrueHD audio plays silently in many browsers (the audio fix solves it).
+      audioRisk: parsed.surround,
       risky: parsed.hevc || parsed.av1 || parsed.surround,
       score,
     });
   }
 
   out.sort((a, b) => b.score - a.score || b.seeders - a.seeders);
-  return out.slice(0, 40);
+  return { results: out.slice(0, 40), skipped };
+}
+
+// Short description of a release name (used for the file that is actually playing).
+export function describeRelease(name) {
+  const p = parseRelease(name);
+  return {
+    name,
+    quality: p.quality,
+    audio: p.audio,
+    codec: p.hevc ? 'HEVC' : p.av1 ? 'AV1' : p.h264 ? 'H.264' : null,
+    source: p.source,
+    lang: p.langLabel,
+    langs: p.languages,
+    langAssumed: p.langAssumed,
+  };
 }

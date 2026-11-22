@@ -20,7 +20,7 @@ function Hero({ data, children, onClose }) {
 }
 
 export default function TitleModal({ target, onClose, onOpenOther }) {
-  const { play, inList, toggleList } = useApp();
+  const { play, inList, toggleList, download } = useApp();
   const scrollRef = useRef(null);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -29,6 +29,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
   const [season, setSeason] = useState(null);
   const [episodes, setEpisodes] = useState({});
   const [showSources, setShowSources] = useState(false);
+  const [epSources, setEpSources] = useState(null); // "season:episode" whose source list is open
   const requested = useRef(new Set());
 
   const { type, id } = target;
@@ -42,6 +43,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
     setEpisodes({});
     setSeason(null);
     setShowSources(false);
+    setEpSources(null);
     requested.current = new Set();
     scrollRef.current?.scrollTo({ top: 0 });
 
@@ -175,7 +177,12 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                 <p className="mb-2 text-sm text-[#b3b3b3]">
                   Pick a specific release{type === 'tv' && playTarget ? ` for S${playTarget.season}:E${playTarget.episode}` : ''}. Best matches are listed first.
                 </p>
-                <SourcePicker spec={mainSpec} onPick={(source) => play({ ...mainSpec, source })} />
+                <SourcePicker
+                  spec={mainSpec}
+                  onPick={(source) => play({ ...mainSpec, source })}
+                  onPickFix={(source) => play({ ...mainSpec, source, audioFix: true })}
+                  onDownload={(source) => download(source, mainSpec)}
+                />
               </div>
             )}
 
@@ -244,35 +251,62 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                     const pr = progressMap[`${season}:${ep.number}`];
                     const pct = pr && pr.durationSeconds ? Math.min(1, pr.positionSeconds / pr.durationSeconds) : 0;
                     const isTarget = playTarget?.season === season && playTarget?.episode === ep.number;
+                    const epKey = `${season}:${ep.number}`;
+                    const epSpec = specFor(season, ep.number, ep.name);
                     return (
-                      <button
-                        key={ep.number}
-                        onClick={() => play(specFor(season, ep.number, ep.name))}
-                        className={cx('group flex w-full items-center gap-3 border-b border-[#404040] px-2 py-4 text-left transition-colors hover:bg-[#2a2a2a] sm:gap-5 sm:px-4', isTarget && 'bg-[#333]')}
-                      >
-                        <span className="w-6 shrink-0 text-center text-xl text-[#d2d2d2] sm:w-8 sm:text-2xl">{ep.number}</span>
-                        <span className="relative aspect-video w-[112px] shrink-0 overflow-hidden rounded bg-[#2a2a2a] sm:w-[130px]">
-                          {ep.still && <img src={img(ep.still, 'w300')} alt="" loading="lazy" className="h-full w-full object-cover" />}
-                          <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-                            <span className="flex h-9 w-9 items-center justify-center rounded-full border-2 border-white bg-black/50">
-                              <PlayIcon size={18} />
+                      <div key={ep.number} className={cx('border-b border-[#404040]', isTarget && 'bg-[#333]')}>
+                        <div className="group flex items-center transition-colors hover:bg-[#2a2a2a]">
+                          <button
+                            onClick={() => play(epSpec)}
+                            className="flex min-w-0 flex-1 items-center gap-3 px-2 py-4 text-left sm:gap-5 sm:px-4"
+                          >
+                            <span className="w-6 shrink-0 text-center text-xl text-[#d2d2d2] sm:w-8 sm:text-2xl">{ep.number}</span>
+                            <span className="relative aspect-video w-[112px] shrink-0 overflow-hidden rounded bg-[#2a2a2a] sm:w-[130px]">
+                              {ep.still && <img src={img(ep.still, 'w300')} alt="" loading="lazy" className="h-full w-full object-cover" />}
+                              <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
+                                <span className="flex h-9 w-9 items-center justify-center rounded-full border-2 border-white bg-black/50">
+                                  <PlayIcon size={18} />
+                                </span>
+                              </span>
+                              {pct > 0 && (
+                                <span className="absolute inset-x-0 bottom-0 h-[3px] bg-white/30">
+                                  <span className="block h-full bg-nf-red" style={{ width: `${pct * 100}%` }} />
+                                </span>
+                              )}
                             </span>
-                          </span>
-                          {pct > 0 && (
-                            <span className="absolute inset-x-0 bottom-0 h-[3px] bg-white/30">
-                              <span className="block h-full bg-nf-red" style={{ width: `${pct * 100}%` }} />
+                            <span className="min-w-0 flex-1">
+                              <span className="flex items-baseline justify-between gap-3">
+                                <span className="truncate text-[15px] font-bold sm:text-base">{ep.name}</span>
+                                <span className="shrink-0 text-sm text-[#d2d2d2]">{ep.runtime ? `${ep.runtime}m` : ''}</span>
+                              </span>
+                              <span className="mt-1 line-clamp-2 text-[13px] leading-snug text-[#d2d2d2]">{ep.overview}</span>
+                              {pr?.completed && (
+                                <span className="mt-1 inline-flex items-center gap-1 text-xs text-[#46d369]">
+                                  <CheckIcon size={13} /> Watched
+                                </span>
+                              )}
                             </span>
-                          )}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="flex items-baseline justify-between gap-3">
-                            <span className="truncate text-[15px] font-bold sm:text-base">{ep.name}</span>
-                            <span className="shrink-0 text-sm text-[#d2d2d2]">{ep.runtime ? `${ep.runtime}m` : ''}</span>
-                          </span>
-                          <span className="mt-1 line-clamp-2 text-[13px] leading-snug text-[#d2d2d2]">{ep.overview}</span>
-                          {pr?.completed && <span className="mt-1 inline-flex items-center gap-1 text-xs text-[#46d369]"><CheckIcon size={13} /> Watched</span>}
-                        </span>
-                      </button>
+                          </button>
+                          <button
+                            onClick={() => setEpSources(epSources === epKey ? null : epKey)}
+                            aria-label={`Sources and download for episode ${ep.number}`}
+                            title="Sources & download"
+                            className={cx('icon-btn mr-2 !h-9 !w-9 shrink-0 sm:mr-4', epSources === epKey && '!border-white !bg-white !text-black')}
+                          >
+                            <ListIcon size={16} />
+                          </button>
+                        </div>
+                        {epSources === epKey && (
+                          <div className="animate-fadeIn px-2 pb-4 sm:px-4">
+                            <SourcePicker
+                              spec={epSpec}
+                              onPick={(source) => play({ ...epSpec, source })}
+                              onPickFix={(source) => play({ ...epSpec, source, audioFix: true })}
+                              onDownload={(source) => download(source, epSpec)}
+                            />
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                   {seasonData && !seasonData.loading && seasonData.list.length === 0 && (
