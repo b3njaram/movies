@@ -39,6 +39,14 @@ import { listAccounts, createAccount, updateAccount, adminSummary } from './admi
 import { validatedFileRef, listSubtitleFiles, toVtt } from './subtitles.js';
 import { allowedByRating, maxAgeValue, cleanMarkers, safeContentKey, cleanDiscoverFilters } from './premium.js';
 import { thumbnailFor } from './preview.js';
+import fs from 'node:fs';
+import {
+  getPlaybackSettings, savePlaybackSettings, getServerOptions, updateServerOptions,
+  insertDownload, getDownload, listDownloads, listReady, updateDownload, deleteDownload,
+  monitorSummary, recordEvent, savePresence, listPresence, claimPresence, pollHandoff, removePresence,
+} from './advanced-db.js';
+import {validHash,validFileIndex,downloadName,convertOptions,deviceId,safeContentKey as safeAdvancedContentKey} from './advanced-rules.js';
+import {startAdvancedJobs,setDownloadTouch,wakeDownloads,cancelCurrent,removeJobFiles,localFileStatus,serverRuntime,createBackup,listBackups,backupFile,convertVideo} from './advanced-worker.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
 const PROWLARR_API_KEY = process.env.PROWLARR_API_KEY || '';
@@ -120,6 +128,8 @@ app.get('/api/auth/check', (req, res) => {
     const hash = url.searchParams.get('link');
     if (!hash || !isGrantedHash(req.user.id, pid, hash)) return res.sendStatus(403);
   }
+  const {bandwidthMbps}=getPlaybackSettings(pid);
+  res.setHeader('X-Stream-Rate', String(bandwidthMbps ? Math.floor(bandwidthMbps * 1000000 / 8) : 0));
   return res.sendStatus(204);
 });
 
@@ -152,6 +162,20 @@ app.patch('/api/admin/users/:id', requireAdmin, wrap(async (req, res) => {
   console.info(`[admin] ${req.body?.action} on account ${id} by user ${req.user.id}`);
   res.json({ ok: true });
 }));
+
+
+// Phase 3 monitoring, storage quotas, backup and conversion limits are all in
+// the existing data mount. Settings require an admin profile.
+app.get('/api/admin/advanced', requireAdmin, (req,res)=>{
+  res.json({options:getServerOptions(),metrics:monitorSummary(),runtime:serverRuntime(),backups:listBackups()});
+});
+app.put('/api/admin/advanced',requireAdmin,(req,res)=>res.json({options:updateServerOptions(req.body||{})}));
+app.post('/api/admin/backups',requireAdmin,wrap(async(req,res)=>res.status(201).json({backup:await createBackup()})));
+app.get('/api/admin/backups/:name',requireAdmin,(req,res)=>{
+  const file=backupFile(req.params.name);
+  if(!file)return res.status(404).json({error:'Backup not found.'});
+  res.download(file,req.params.name);
+});
 
 // ---------------------------------------------------------------------------
 // Profiles
@@ -300,6 +324,36 @@ function withProfile(req, res, next) {
   req.profile = profile;
   next();
 }
+
+
+app.get('/api/playback/settings',withProfile,(req,res)=>res.json({settings:getPlaybackSettings(req.profile.id)}));
+app.put('/api/playback/settings',withProfile,(req,res)=>res.json({settings:savePlaybackSettings(req.profile.id,req.body||{})}));
+
+// Handoff notices are scoped to the unlocked profile. A receiving device may
+// only claim a currently-active session from its own profile.
+app.post('/api/playback/presence',withProfile,wrap(async(req,res)=>{
+  const b=req.body||{};
+  if(req.profile.maxAge<18) await enforceTitleRating(req.profile,b.mediaType,b.tmdbId);
+  savePresence(req.profile.id,b);
+  res.json({ok:true});
+}));
+app.get('/api/playback/devices',withProfile,(req,res)=>{
+  res.json({devices:listPresence(req.profile.id,req.query.deviceId?deviceId(req.query.deviceId):null)});
+});
+app.post('/api/playback/claim',withProfile,wrap(async(req,res)=>{
+  const item=listPresence(req.profile.id).find(x=>x.deviceId===req.body?.sourceDevice);
+  if(!item)throw httpError(404,'That device is no longer playing.');
+  if(req.profile.maxAge<18)await enforceTitleRating(req.profile,item.type,item.tmdbId);
+  const row=claimPresence(req.profile.id,req.body?.sourceDevice,req.body?.targetDevice);
+  const progress=getProgressByKey(req.profile.id,row.content_key);
+  res.json({session:{type:row.media_type,tmdbId:row.tmdb_id,title:row.title,season:row.season,episode:row.episode,
+    contentKey:row.content_key,positionSeconds:row.position_seconds,durationSeconds:row.duration_seconds,
+    magnet:progress?.magnet||null,poster:progress?.poster||null,year:progress?.year||null}});
+}));
+app.get('/api/playback/commands',withProfile,(req,res)=>res.json(pollHandoff(req.profile.id,req.query.deviceId)));
+app.delete('/api/playback/presence/:deviceId',withProfile,(req,res)=>{
+  removePresence(req.profile.id,req.params.deviceId);res.json({ok:true});
+});
 
 async function enforceTitleRating(profile,type,id) {
   if (profile.maxAge >= 18) return null;
@@ -505,6 +559,7 @@ app.get('/api/sources', withProfile, wrap(async (req, res) => {
 
 const touched = new Map(); // hash -> last time a client showed interest
 const touch = (hash) => touched.set(hash, Date.now());
+setDownloadTouch(touch);
 
 async function tsPost(pathname, body, timeoutMs = 20000) {
   let res;
@@ -681,6 +736,70 @@ app.get('/api/stats/:hash', withActiveProfile, requireGrantedFile, wrap(async (r
 // Sidecar SRT and VTT subtitles found beside the selected video in TorrServer.
 // No third-party subtitle service or API key is needed. Subtitles never modify
 // the main video stream and no file is stored in SQLite.
+
+// One server-side download at a time. Source references have already gone
+// through /api/stream, which validates index and age permissions.
+app.get('/api/downloads/queue',withProfile,(req,res)=>res.json({jobs:listDownloads(req.profile.id)}));
+app.get('/api/library',withProfile,(req,res)=>res.json({items:listReady(req.profile.id)}));
+app.post('/api/downloads/queue',withProfile,wrap(async(req,res)=>{
+  const b=req.body||{};
+  const hash=validHash(b.hash),index=validFileIndex(b.index);
+  if(index<1)throw httpError(400,'Invalid file index.');
+  if(req.profile.maxAge<18&&!isGrantedHash(req.user.id,req.profile.id,hash))throw httpError(403,'This download is not approved for this profile.');
+  if(!['movie','tv','raw'].includes(b.mediaType))throw httpError(400,'Invalid media type.');
+  if(req.profile.maxAge<18)await enforceTitleRating(req.profile,b.mediaType,b.tmdbId);
+  const key=safeAdvancedContentKey(b.contentKey);
+  const info=await tsPost('/torrents',{action:'get',hash});
+  const selected=(info.file_stats||[]).find(f=>Number(f.id)===index);
+  if(!selected || !/\.(mp4|mkv|webm|avi|mov|ts|m4v)$/i.test(selected.path||selected.name||''))throw httpError(404,'Video file is no longer available.');
+  const name=downloadName(selected.path||selected.name);
+  const length=Number(selected.length||0);
+  if(!Number.isSafeInteger(length)||length<0||length>100*1024**3)throw httpError(400,'Invalid file length.');
+  const title=String(b.title||name).trim().slice(0,180);
+  const job=insertDownload({userId:req.user.id,profileId:req.profile.id,hash,index,fileName:name,title,contentKey:key,
+    mediaType:b.mediaType,tmdbId:b.tmdbId?Number(b.tmdbId):null,season:b.season??null,episode:b.episode??null,totalBytes:length});
+  recordEvent('download_queued',req.profile.id);touch(hash);wakeDownloads();
+  res.status(201).json({job});
+}));
+app.post('/api/downloads/queue/:id',withProfile,(req,res)=>{
+  const job=getDownload(Number(req.params.id));
+  if(!job||job.profile_id!==req.profile.id)return res.status(404).json({error:'Download not found.'});
+  const action=req.body?.action;
+  if(action==='pause' && ['queued','running','failed'].includes(job.status)){
+    updateDownload(job.id,{status:'paused'});cancelCurrent(job.id);
+  }else if(action==='resume' && ['paused','failed'].includes(job.status)){
+    updateDownload(job.id,{status:'queued',error:null});wakeDownloads();
+  }else if(action==='delete'){
+    updateDownload(job.id,{status:'paused'});cancelCurrent(job.id);removeJobFiles(job);deleteDownload(job.id);
+  }else return res.status(400).json({error:'This action is not available for this download.'});
+  res.json({ok:true});
+});
+app.get('/api/library/stream/:id',withActiveProfile,(req,res)=>{
+  const job=getDownload(Number(req.params.id));
+  if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)return res.sendStatus(404);
+  const file=localFileStatus(job);
+  if(!file)return res.status(404).json({error:'Saved video not found.'});
+  res.setHeader('Cache-Control','no-store');
+  recordEvent('local_playback',req.profile.id);
+  res.sendFile(file,{acceptRanges:true});
+});
+app.get('/api/video/convert',withActiveProfile,wrap(async(req,res)=>{
+  const opts=convertOptions(req.query);
+  let url;
+  if(req.query.libraryId){
+    const job=getDownload(Number(req.query.libraryId));
+    if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)throw httpError(404,'Saved video not found.');
+    url=localFileStatus(job);
+    if(!url)throw httpError(404,'Saved video file missing.');
+  }else{
+    const {hash,index}=fileRef(req);
+    if(req.profile.maxAge<18&&!isGrantedHash(req.user.id,req.profile.id,hash))throw httpError(403,'Source not permitted.');
+    url=torrentFileUrl(hash,index);touch(hash);
+  }
+  recordEvent('conversion_started',req.profile.id);
+  convertVideo(req,res,{url,...opts});
+}));
+
 app.get('/api/subtitles', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const { hash, index } = validatedFileRef(req.query.hash, req.query.index);
   const info = await tsPost('/torrents', { action: 'get', hash }, 8000);
@@ -1127,6 +1246,7 @@ app.listen(PORT, () => {
   console.log(`  Prowlarr:   ${PROWLARR_URL}`);
   console.log(`  TorrServer: ${TORRSERVER_URL}`);
   console.log(`  TMDB:       ${tmdbEnabled() ? 'configured' : 'NOT configured (set TMDB_API_KEY to enable the catalog)'}`);
+  startAdvancedJobs();
   setTimeout(async () => {
     const p = await checkProwlarr();
     if (!p.ok) console.error(`[startup] ${p.reason}`);

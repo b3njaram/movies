@@ -13,6 +13,8 @@ export const NAV = [
   ['new', 'New & Popular'],
   ['list', 'My List'],
   ['discover', 'Discover'],
+  ['library', 'Library'],
+  ['playback', 'Settings'],
 ];
 
 export default function Header({ page, onNav, query, onQuery, profile, isAdmin = false, tvMode = false, onTvMode, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
@@ -85,7 +87,7 @@ export default function Header({ page, onNav, query, onQuery, profile, isAdmin =
         </button>
 
         {/* desktop nav */}
-        <nav className="hidden items-center gap-5 md:flex">
+        <nav className="hidden items-center gap-3 lg:gap-5 lg:flex">
           {navItems.map(([id, label]) => (
             <button
               key={id}
@@ -101,7 +103,7 @@ export default function Header({ page, onNav, query, onQuery, profile, isAdmin =
         </nav>
 
         {/* mobile nav */}
-        <div className="relative md:hidden">
+        <div className="relative lg:hidden">
           <button onClick={() => setMenu(menu === 'browse' ? null : 'browse')} className="flex items-center gap-1 text-sm font-bold">
             {t(activeLabel)}
             <ChevronDown size={16} className={cx('transition-transform', menu === 'browse' && 'rotate-180')} />

@@ -1,7 +1,7 @@
 name: StreamHub checks
 on:
   push:
-    branches: [main, 'phase1-*', 'phase2-*']
+    branches: [main, 'phase1-*', 'phase2-*', 'phase3-*']
   pull_request:
     branches: [main]
 jobs:
@@ -15,12 +15,17 @@ jobs:
       - name: Compatibility and subtitle tests
         run: node --test backend/test/*.test.js frontend/test/*.test.js
       - name: Database migration compatibility
-        run: python3 tests/migration.test.py
+        run: |
+          python3 tests/migration.test.py
+          python3 tests/advanced-migration.test.py
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --no-audit --no-fund
       - name: Validate backend JavaScript
         run: |
+          node --check backend/advanced-rules.js
+          node --check backend/advanced-db.js
+          node --check backend/advanced-worker.js
           node --check backend/premium.js
           node --check backend/preview.js
           node --check backend/tmdb.js

@@ -4,7 +4,7 @@
 function getProfileId() { try { return localStorage.getItem('sh_profile'); } catch { return null; } }
 
 const ORDER = { SD: 0, '480p': 1, '720p': 2, '1080p': 3, '2160p': 4 };
-const QUALITY = ['auto', '2160p', '1080p', '720p'];
+const QUALITY = ['auto', '2160p', '1080p', '720p', '480p'];
 function storageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function storageSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private browser */ } }
 function key(suffix) { return `sh_${suffix}_${getProfileId() || 'guest'}`; }
