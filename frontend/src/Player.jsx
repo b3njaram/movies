@@ -475,6 +475,7 @@ export default function Player({ spec, onClose, onNext }) {
             const data = await api('/api/stream', {
               method: 'POST',
               body: { link: cand.link, season: spec.season, episode: spec.episode, contentKey },
+              signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(65000) : undefined,
             });
             if (cancelled) return null;
             const rel = data.release || {};
@@ -557,7 +558,11 @@ export default function Player({ spec, onClose, onNext }) {
       let info = null;
       let useFix = false;
       const explicit = fixExplicitRef.current;
-      if (explicit || autoFixPref()) {
+      // A release already marked AAC/Opus/MP3 should play directly even when
+      // auto-fix is enabled; avoid an expensive ffprobe on every safe source.
+      const advertisedAudio = src?.audio || data.release?.audio;
+      const safeAdvertisedAudio = ['AAC', 'Opus', 'MP3'].includes(advertisedAudio);
+      if (explicit || (autoFixPref() && !safeAdvertisedAudio)) {
         try {
           setMessage('Preparing audio fix…');
           info = await api(`/api/audiofix/probe?hash=${data.hash}&index=${data.fileIndex}`);

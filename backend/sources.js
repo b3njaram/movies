@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { httpError } from './tmdb.js';
+import {isLikelyVideoRelease,isBrowserIncompatibleContainer} from './playback-selection.js';
 
 // ---------------------------------------------------------------------------
 // Opaque link references.
@@ -164,6 +165,7 @@ export function parseRelease(name) {
   else if (/\baac/.test(t)) audio = 'AAC';
   else if (/\bopus\b/.test(t)) audio = 'Opus';
   else if (/\bmp3\b/.test(t)) audio = 'MP3';
+  const containerRisk = isBrowserIncompatibleContainer(name);
   const remux = /\bremux\b/.test(t);
   const hdr = /\b(hdr10?\+?|dolby[ .]?vision|dv)\b/.test(t);
 
@@ -193,7 +195,7 @@ export function parseRelease(name) {
 
   const lang = parseLanguages(name);
 
-  return { quality, hevc, av1, h264, surround, aac, audio, remux, hdr, source, season, episode, pack, packSeason, ...lang };
+  return { quality, hevc, av1, h264, containerRisk, surround, aac, audio, remux, hdr, source, season, episode, pack, packSeason, ...lang };
 }
 
 export function scoreRelease(p, seeders, sizeBytes, want = {}) {
@@ -203,6 +205,7 @@ export function scoreRelease(p, seeders, sizeBytes, want = {}) {
   if (p.source === 'WEB' || p.source === 'BluRay') s += 8;
   if (p.hevc) s -= 28;
   if (p.av1) s -= 40;
+  if (p.containerRisk) s -= 180; // HTML5 browsers generally cannot play AVI/WMV
   // Browsers (Firefox especially) cannot decode AC3/E-AC3/DTS/TrueHD, which shows up as "no sound".
   // AAC is strongly preferred; it outweighs roughly a 5x seeder advantage.
   if (p.aac) s += 45;
@@ -219,8 +222,8 @@ export function scoreRelease(p, seeders, sizeBytes, want = {}) {
   else if (seeders < 3) s -= 15;
 
   if (want.type === 'tv' && want.episode != null) {
-    if (p.season === want.season && p.episode === want.episode) s += 40;
-    else if (p.pack && p.packSeason === want.season) s += 5;
+    if (p.season === want.season && p.episode === want.episode) s += 65;
+    else if (p.pack && p.packSeason === want.season) s -= 20; // prefer an exact episode over huge packs
     else if (p.pack && p.packSeason == null) s -= 10;
     else s -= 1000; // different episode / different season
   }
@@ -384,6 +387,7 @@ export async function searchSources({ prowlarrUrl, apiKey, ...want }) {
 
   for (const raw of raws) {
     if (raw.protocol && raw.protocol !== 'torrent') continue;
+    if (!isLikelyVideoRelease(raw.title, raw.size)) continue; // never offer subtitle-only or tiny releases
     const dedupeKey = raw.infoHash || raw.guid || `${raw.title}:${raw.size}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
@@ -427,10 +431,11 @@ export async function searchSources({ prowlarrUrl, apiKey, ...want }) {
       langAssumed: parsed.langAssumed,
       langMatch: fit.match,
       // HEVC/AV1 video often will not play in a browser (the audio fix cannot help with that)...
-      videoRisk: parsed.hevc || parsed.av1,
+      videoRisk: parsed.hevc || parsed.av1 || parsed.containerRisk,
+      containerRisk: parsed.containerRisk,
       // ...while AC3/E-AC3/DTS/TrueHD audio plays silently in many browsers (the audio fix solves it).
       audioRisk: parsed.surround,
-      risky: parsed.hevc || parsed.av1 || parsed.surround,
+      risky: parsed.hevc || parsed.av1 || parsed.containerRisk || parsed.surround,
       score,
     });
   }

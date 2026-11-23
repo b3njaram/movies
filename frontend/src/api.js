@@ -70,6 +70,7 @@ export async function api(path, { method = 'GET', body, signal } = {}) {
     });
   } catch (e) {
     if (e.name === 'AbortError') throw e;
+    if (e.name === 'TimeoutError') throw new ApiError('TorrServer took too long to prepare this source. Trying another release may help.', 504, 'SOURCE_TIMEOUT');
     throw new ApiError('Cannot reach the server. Check your connection.', 0, 'NETWORK');
   }
 
