@@ -1,4 +1,7 @@
 import { Localized } from './locale';
+import {shiftTextTrack} from './subtitle-timing';
+import {castMedia} from './chromecast';
+import {saveOffline} from './Offline';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, BASE, getProfileId, sendBeaconJson } from './api';
 import { useApp } from './context';
@@ -172,6 +175,10 @@ export default function Player({ spec, onClose, onNext }) {
   const [localSubtitle, setLocalSubtitle] = useState(null);
   const subtitleInput = useRef(null);
   const subtitleUrl = useRef(null);
+  const subtitleOriginalTimes = useRef(new WeakMap());
+  const [subtitleOffset,setSubtitleOffset] = useState(0);
+  const [subtitleSize,setSubtitleSize] = useState(100);
+  const [savingOffline,setSavingOffline] = useState(false);
 
   const contentKey = contentKeyOf(spec);
   const supportsMarkers=/^(movie:\d+|tv:\d+:s\d+e\d+)$/.test(contentKey);
@@ -230,6 +237,37 @@ export default function Player({ spec, onClose, onNext }) {
     setCanCast(Boolean(v?.remote?.prompt || v?.webkitShowPlaybackTargetPicker));
     if(v)v.setAttribute('x-webkit-airplay','allow');
   },[videoSrc]);
+  const castSavedToChromecast=useCallback(async()=>{
+    if(!stream?.localId&&!stream?.localMediaId)return notify('Save this video to the server before casting to Chromecast.');
+    try{
+      const kind=stream.localId?'library':'media',id=stream.localId||stream.localMediaId;
+      const response=await api('/api/cast/session',{method:'POST',body:{kind,id}});
+      const url=new URL(response.path,window.location.origin).href;
+      await castMedia({url,title:spec.title,mime:response.mime,position:videoRef.current?.currentTime||0});
+      notify('Chromecast playback started.');
+    }catch(e){notify(e.message);}
+  },[stream?.localId,stream?.localMediaId,spec.title,notify]);
+  const saveToPhone=useCallback(async()=>{
+    if(!stream||savingOffline)return;
+    const src=stream.localId?`${BASE}/api/library/stream/${stream.localId}`:
+      stream.localMediaId?`${BASE}/api/local-media/stream/${stream.localMediaId}`:
+      stream.hash?`${BASE}/api/download?hash=${encodeURIComponent(stream.hash)}&index=${stream.fileIndex}&name=${encodeURIComponent(stream.fileName||'video.mp4')}`:null;
+    if(!src)return notify('This source cannot be downloaded offline.');
+    setSavingOffline(true);notify('Saving video for offline playback…');
+    try{
+      await saveOffline(src,{title:spec.title,poster:spec.poster,profileId:profile.id,profileName:profile.name},
+        ({downloaded,total})=>{ /* Keep active video playing during device download. */ });
+      notify('Saved! Open Offline Downloads to play without internet.');
+    }catch(e){notify(e.message);}finally{setSavingOffline(false);}
+  },[stream,savingOffline,spec.title,spec.poster,profile?.id,profile?.name,notify]);
+  useEffect(()=>{
+    const el=videoRef.current;if(!el)return;
+    const apply=()=>{for(const track of Array.from(el.textTracks||[]))shiftTextTrack(track,subtitleOffset,subtitleOriginalTimes.current);};
+    const nodes=Array.from(el.querySelectorAll('track'));
+    nodes.forEach(n=>n.addEventListener('load',apply));apply();
+    const timer=setInterval(apply,2500);
+    return()=>{clearInterval(timer);nodes.forEach(n=>n.removeEventListener('load',apply));};
+  },[subtitleOffset,videoSrc,subtitleFiles,localSubtitle]);
   const castToDevice=useCallback(async()=>{
     const v=videoRef.current;
     try {
@@ -1208,6 +1246,7 @@ export default function Player({ spec, onClose, onNext }) {
       className="sh-player fixed inset-0 z-[200] select-none overflow-hidden bg-black text-white"
       style={{ cursor: hideCursor ? 'none' : 'default' }}
     >
+        <style>{`.sh-player video::cue { font-size: ${subtitleSize}% !important; }`}</style>
       {partyCode && <div className="absolute left-1/2 top-16 z-[80] flex -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-lg bg-black/80 px-4 py-2 text-xs shadow-lg sm:text-sm">
         <span>{t('Watch party')}: <strong className="select-text tracking-widest">{partyCode}</strong></span>
         <span>{partyViewers} {t('viewers')}</span>
@@ -1578,6 +1617,10 @@ export default function Player({ spec, onClose, onNext }) {
                   <p className="px-2 pt-2 text-xs text-white/50">{subtitleFiles.length ? `${subtitleFiles.length} ${t('Subtitles')}` : t('No captions available for this source.')}</p>
                   <button className="mt-1 block w-full rounded px-3 py-2 text-left hover:bg-white/15" onClick={() => subtitleInput.current?.click()}>{t('Load your own SRT/VTT')}</button>
                   <input ref={subtitleInput} type="file" accept=".srt,.vtt,text/vtt" className="hidden" onChange={e => { loadCustomSubtitle(e.target.files?.[0]); e.target.value=''; }} />
+                  <div className="mt-2 border-t border-white/20 pt-2"><p className="px-2 text-xs text-white/60">Subtitle sync: {subtitleOffset>0?'+':''}{subtitleOffset.toFixed(1)}s</p>
+                    <div className="mt-1 flex items-center justify-around"><button className="rounded bg-white/15 px-3 py-1" onClick={()=>setSubtitleOffset(v=>Math.max(-20,+(v-0.5).toFixed(1)))}>−0.5s</button><button className="rounded bg-white/15 px-3 py-1" onClick={()=>setSubtitleOffset(0)}>Reset</button><button className="rounded bg-white/15 px-3 py-1" onClick={()=>setSubtitleOffset(v=>Math.min(20,+(v+0.5).toFixed(1)))}>+0.5s</button></div>
+                    <p className="mt-2 px-2 text-xs text-white/60">Caption size</p><div className="mt-1 flex gap-2 px-2">{[100,125,150].map(v=><button key={v} onClick={()=>setSubtitleSize(v)} className={`rounded px-2 py-1 text-xs ${subtitleSize===v?'bg-white text-black':'bg-white/15'}`}>{v}%</button>)}</div>
+                  </div>
                 </div>
               )}
             </div>
@@ -1615,6 +1658,8 @@ export default function Player({ spec, onClose, onNext }) {
                 <button className="mt-2 block w-full rounded px-2 py-2 text-left text-red-200 hover:bg-white/15" onClick={()=>{writeMarkers({introStart:null,introEnd:null,creditsStart:null});setSkipMenu(false);}}>{t('Clear skip markers')}</button>
               </div>}
             </div>}
+            {phase==='ready' && <button onClick={saveToPhone} disabled={savingOffline} aria-label="Save offline" title="Save offline to this device" className={`${iconBtn} text-xs disabled:opacity-40`}>↓ <span className="hidden lg:inline">Offline</span></button>}
+            {(stream?.localId||stream?.localMediaId) && <button onClick={castSavedToChromecast} title="Cast saved MP4/WebM to Chromecast" aria-label="Chromecast" className={`${iconBtn} text-xs`}>Cast</button>}
             {canCast && <button onClick={castToDevice} aria-label={t('Cast / AirPlay')} title={t('Cast / AirPlay')} className={iconBtn}>▣</button>}
             <button onClick={toggleFs} aria-label={t(isFs ? 'Exit full screen' : 'Full screen')} className={iconBtn}>
               {isFs ? <ExitFullscreenIcon size={32} /> : <FullscreenIcon size={32} />}

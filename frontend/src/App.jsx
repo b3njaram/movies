@@ -17,6 +17,7 @@ import Admin from './Admin';
 import {LibraryPage,PlaybackSettings} from './Advanced';
 import InstallPrompt from './InstallPrompt';
 import Community from './Community';
+import Offline from './Offline';
 import { useLocale } from './locale';
 import { CloseIcon } from './Icons';
 import {setQualityPref} from './compat';
@@ -480,6 +481,8 @@ export default function App() {
             <SearchView query={query.trim()} />
           ) : page === 'community' ? (
             <Community isAdmin={auth.isAdmin && profile.maxAge>=18}/>
+          ) : page === 'offline' ? (
+            <Offline />
           ) : page === 'library' ? (
             <LibraryPage />
           ) : page === 'playback' ? (

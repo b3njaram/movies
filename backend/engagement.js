@@ -1,6 +1,7 @@
 // Phase 6: private per-profile notifications and homepage choices.
 // The existing SQLite database/bind mount is reused; migrations are additive.
 import { db } from './db.js';
+import {schedulePush} from './push.js';
 
 const safeText = (value, max) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max);
 const destinations = new Set(['library', 'community', 'home']);
@@ -38,6 +39,7 @@ export function addNotification(profileId, eventKey, kind, title, message, desti
     VALUES(?,?,?,?,?,?,?)`).run(id,key,safeText(kind,32),heading,safeText(message,260),
       validDestination(destination) ? destination : 'home',Date.now());
   // Bound disk growth for small servers while retaining at least 120 recent entries.
+  if (result.changes) schedulePush();
   if (result.changes) db.prepare(`DELETE FROM profile_notifications WHERE profile_id=? AND id NOT IN
     (SELECT id FROM profile_notifications WHERE profile_id=? ORDER BY id DESC LIMIT 120)`).run(id,id);
   return Boolean(result.changes);
