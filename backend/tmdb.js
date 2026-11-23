@@ -38,12 +38,19 @@ async function tmdbFetch(pathname, params = {}) {
   return res.json();
 }
 
+// Coalesce simultaneous metadata requests across profiles without changing the
+// persistent TMDB cache or increasing the polling interval.
+const inFlight = new Map();
 async function cached(key, ttlSeconds, producer) {
   const hit = cacheGet(key, ttlSeconds);
   if (hit) return hit;
-  const value = await producer();
-  cacheSet(key, value);
-  return value;
+  if (inFlight.has(key)) return inFlight.get(key);
+  const task = Promise.resolve().then(producer).then(value => {
+    cacheSet(key, value);
+    return value;
+  }).finally(() => inFlight.delete(key));
+  inFlight.set(key, task);
+  return task;
 }
 
 // ---------------------------------------------------------------------------

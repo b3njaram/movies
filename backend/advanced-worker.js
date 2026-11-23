@@ -4,6 +4,7 @@ import os from 'node:os';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { db } from './db.js';
+import {addNotification} from './engagement.js';
 import { bytesPerSecond, downloadName } from './advanced-rules.js';
 import { getDownload, nextQueuedDownload, updateDownload, getServerOptions, libraryBytes, recordEvent } from './advanced-db.js';
 
@@ -72,6 +73,8 @@ async function pump() {
     if(current && ['running','queued'].includes(current.status)){
       updateDownload(job.id,{status:'failed',error:String(e.message||e).slice(0,250)});
       recordEvent('download_failed',job.profile_id);
+      addNotification(job.profile_id,`download:${job.id}:failed`,'download',
+        'Download failed',`${job.title || job.file_name} could not be saved. Open Library to retry.`,'library');
     }
   } finally {busy=false;setImmediate(pump);}
 }
@@ -119,6 +122,8 @@ async function downloadOne(job) {
     fs.renameSync(part,readyPath(job));
     updateDownload(job.id,{status:'ready',downloaded_bytes:bytes,total_bytes:bytes,error:null});
     recordEvent('download_complete',job.profile_id);
+    addNotification(job.profile_id,`download:${job.id}:ready`,'download',
+      'Download complete',`${job.title || job.file_name} is ready in your Library.`,'library');
   } finally {
     if(stream){stream.destroy();await wait(20);}
     activeControllers.delete(job.id);

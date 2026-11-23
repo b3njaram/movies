@@ -354,6 +354,18 @@ export const ES = {
   "Organize titles, request content, and watch together.": "Organiza títulos, solicita contenido y mira con otras personas.",
   "Playback stalled — reconnecting…": "La reproducción se detuvo; reconectando…",
   "Playback stalled. Retry this source or choose another in Sources.": "La reproducción se detuvo. Reintenta o elige otra fuente.",
+  "Notifications": "Notificaciones",
+  "Mark all read": "Marcar todo como leído",
+  "No notifications yet.": "Aún no hay notificaciones.",
+  "unread": "sin leer",
+  "Download complete": "Descarga completada",
+  "Download failed": "Descarga fallida",
+  "Title request updated": "Solicitud de título actualizada",
+  "Hide watched movies": "Ocultar películas vistas",
+  "Show watched movies": "Mostrar películas vistas",
+  "Watch again": "Ver de nuevo",
+  "Choose whether to hide watched movies.": "Elige si quieres ocultar las películas vistas.",
+  "Cross-origin requests are not allowed.": "No se permiten solicitudes de otros orígenes.",
 
 };
 

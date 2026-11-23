@@ -94,8 +94,11 @@ export function listRequests(profileId,isAdmin=false) {
 export function requestStatus(id,status) {
   const requestId=positiveId(id);
   if(!['pending','approved','available','declined'].includes(status))throw invalid('Invalid request status.');
-  if(!db.prepare('UPDATE community_requests SET status=?,updated_at=? WHERE id=?').run(status,now(),requestId).changes)
-    fail('Request not found.');
+  const old=db.prepare('SELECT profile_id AS profileId,title,status FROM community_requests WHERE id=?').get(requestId);
+  if(!old)fail('Request not found.');
+  if(old.status===status)return {id:requestId,profileId:old.profileId,title:old.title,status,changed:false};
+  db.prepare('UPDATE community_requests SET status=?,updated_at=? WHERE id=?').run(status,now(),requestId);
+  return {id:requestId,profileId:old.profileId,title:old.title,status,changed:true};
 }
 function expireParties(){db.prepare('DELETE FROM community_parties WHERE expires_at<?').run(now());}
 function partyRecord(code){return db.prepare('SELECT * FROM community_parties WHERE code=? AND expires_at>?').get(roomCode(code),now());}

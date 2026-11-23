@@ -1,8 +1,9 @@
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
 import express from 'express';
-import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import {LoginLimiter,isAllowedMutation} from './security-rules.js';
+import {addNotification,listNotifications,readNotifications,deleteNotification,getHomePreferences,setHomePreferences,completedMovies,watchAgainMovies} from './engagement.js';
 import {
   getUserByUsername,
   ensureDefaultProfile,
@@ -60,9 +61,12 @@ const TORRSERVER_URL = (process.env.TORRSERVER_URL || 'http://localhost:8090').r
 const PORT = process.env.PORT || 4000;
 
 const app = express();
-app.set('trust proxy', true);
+// Only trust the local/private Nginx proxy, not attacker-supplied forward headers.
+app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 app.disable('x-powered-by');
-app.use(cors({ origin: true, credentials: true }));
+// The shipped frontend uses same-origin /api URLs; credentialed wildcard CORS is unnecessary.
+app.use('/api', (req,res,next)=>isAllowedMutation(req.method,req.get('origin'),req.get('host'),req.get('sec-fetch-site'))
+  ? next() : res.status(403).json({error:'Cross-origin requests are not allowed.'}));
 app.use(express.json({ limit: '256kb' }));
 app.use(cookieParser());
 
@@ -72,36 +76,29 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // Login (public) — with a small brute-force limiter, since this may be internet-facing
 // ---------------------------------------------------------------------------
 
-const attempts = new Map();
-const WINDOW_MS = 5 * 60 * 1000;
-const MAX_ATTEMPTS = 10;
-
-// Behind Cloudflare the real client address arrives in CF-Connecting-IP (it cannot be spoofed there).
-const clientIp = (req) => req.get('cf-connecting-ip') || req.ip;
-
-function tooManyAttempts(ip) {
-  const now = Date.now();
-  const list = (attempts.get(ip) || []).filter((t) => now - t < WINDOW_MS);
-  attempts.set(ip, list);
-  return list.length >= MAX_ATTEMPTS;
-}
+const loginLimiter = new LoginLimiter();
+// req.ip honors only Nginx/private proxy hops configured above. An arbitrary
+// CF-Connecting-IP header must not let attackers evade the login limiter.
+const clientIp = req => req.ip;
 
 app.post('/api/auth/login', (req, res) => {
   const { username, password, remember } = req.body || {};
-  if (!username || !password) return res.status(400).json({ error: 'Please enter your username and password.' });
+  if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length > 80 || password.length > 512)
+    return res.status(400).json({error:'Please enter a valid username and password.'});
 
-  const ip = clientIp(req);
-  if (tooManyAttempts(ip)) {
+  const ip = `ip:${clientIp(req)}`;
+  const accountKey = `user:${String(username).trim().toLowerCase().slice(0,80)}`;
+  if (loginLimiter.blocked(ip) || loginLimiter.blocked(accountKey)) {
     return res.status(429).json({ error: 'Too many attempts. Please wait a few minutes and try again.' });
   }
 
   const user = getUserByUsername(String(username).trim());
   if (!user || user.disabled || !verifyPassword(String(password), user.password_hash)) {
-    attempts.get(ip).push(Date.now());
+    loginLimiter.fail([ip,accountKey]);
     return res.status(400).json({ error: 'Incorrect username or password.' });
   }
 
-  attempts.delete(ip);
+  loginLimiter.success([ip,accountKey]);
   issueSession(res, user, remember !== false);
   res.json({ username: user.username, isAdmin: Boolean(user.is_admin) });
 });
@@ -418,7 +415,10 @@ app.post('/api/community/requests',withProfile,wrap(async(req,res)=>{
 }));
 app.get('/api/admin/community/requests',requireAdmin,(req,res)=>res.json({requests:listRequests(req.user.id,true)}));
 app.patch('/api/admin/community/requests/:id',requireAdmin,(req,res)=>{
-  requestStatus(req.params.id,req.body?.status);res.json({ok:true});
+  const changed=requestStatus(req.params.id,req.body?.status);
+  if(changed.changed) addNotification(changed.profileId,`request:${changed.id}:${changed.status}`,
+    'request', 'Title request updated', `${changed.title}: ${changed.status}`, 'community');
+  res.json({ok:true});
 });
 // The room shares a content identifier and playback clock, NEVER file URLs,
 // torrents, profile credentials or authorization tokens.
@@ -666,6 +666,23 @@ app.get('/api/recommendations',requireTmdb,withProfile,wrap(async(req,res)=>{
   res.json({items:checked.filter(Boolean),genre:found.genre});
 }));
 
+
+// Private profile notifications and home layout choices.
+app.get('/api/notifications',withProfile,(req,res)=>res.json(listNotifications(req.profile.id)));
+app.post('/api/notifications/read',withProfile,(req,res)=>res.json(readNotifications(req.profile.id,req.body||{})));
+app.delete('/api/notifications/:id',withProfile,(req,res)=>res.json(deleteNotification(req.profile.id,req.params.id)));
+app.get('/api/home/preferences',withProfile,wrap(async(req,res)=>{
+  const watched=completedMovies(req.profile.id);
+  let watchAgain=watchAgainMovies(req.profile.id);
+  if(req.profile.maxAge<18){
+    const rated=await Promise.all(watchAgain.map(async item=>{
+      try{await enforceTitleRating(req.profile,item.type,item.id);return item;}catch{return null;}
+    }));
+    watchAgain=rated.filter(Boolean);
+  }
+  res.json({settings:getHomePreferences(req.profile.id),completedMovieIds:watched,watchAgain});
+}));
+app.put('/api/home/preferences',withProfile,(req,res)=>res.json({settings:setHomePreferences(req.profile.id,req.body)}));
 
 // ---------------------------------------------------------------------------
 // Sources (Prowlarr)

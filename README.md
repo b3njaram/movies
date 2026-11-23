@@ -1,5 +1,7 @@
 # StreamHub
 
+**Phase 6:** private notification bell for downloads and requests, per-profile watched-movie homepage filters and Watch Again, same-origin API protection, hardened login limiting, and fewer duplicate TMDB requests. See [Phase 6 guide](docs/phase6.md).
+
 **Phase 5 (Library & captions):** Conservative TMDB matching for local files, manual poster corrections, embedded text subtitle extraction for local/saved videos, and watch-party chat. See [Phase 5 guide](docs/phase5.md).
 
 **Phase 4:** bounded self-healing playback, protected per-profile collections, title requests with an admin review queue, synchronized watch parties, local-media scanning in the existing data mount, and a host-side verified backup/restore helper. See [Phase 4 guide](docs/phase4.md) and [safe updates/backups](docs/updates-and-backups.md). All existing `.env` and Docker mounts remain unchanged. **New features are additive** and do not erase accounts, watch history or saved media.
