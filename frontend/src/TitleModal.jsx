@@ -1,3 +1,4 @@
+import { Localized, useLocale } from './locale';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { useApp } from './context';
@@ -20,6 +21,7 @@ function Hero({ data, children, onClose }) {
 }
 
 export default function TitleModal({ target, onClose, onOpenOther }) {
+  const { t } = useLocale();
   const { play, inList, toggleList, download } = useApp();
   const scrollRef = useRef(null);
   const [data, setData] = useState(null);
@@ -126,8 +128,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
           <div className="p-10 text-center">
             <p className="text-lg">{error}</p>
             <button onClick={onClose} className="btn-white mt-6">
-              Close
-            </button>
+              <Localized text={"Close"} /></button>
           </div>
         )}
 
@@ -142,21 +143,21 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
               <div className="flex flex-wrap items-center gap-2.5">
                 <button onClick={() => play(mainSpec)} className="btn-white !px-6 sm:!px-8 sm:!py-2.5 sm:!text-xl">
                   <PlayIcon size={26} />
-                  {playTarget?.resume ? 'Resume' : 'Play'}
+                  {t(playTarget?.resume ? 'Resume' : 'Play')}
                   {type === 'tv' && playTarget && <span className="text-sm font-medium opacity-70">S{playTarget.season}:E{playTarget.episode}</span>}
                 </button>
                 <button
                   onClick={() => toggleList(data)}
-                  aria-label={listed ? 'Remove from My List' : 'Add to My List'}
-                  title={listed ? 'Remove from My List' : 'Add to My List'}
+                  aria-label={t(listed ? 'Remove from My List' : 'Add to My List')}
+                  title={t(listed ? 'Remove from My List' : 'Add to My List')}
                   className="icon-btn !h-11 !w-11"
                 >
                   {listed ? <CheckIcon size={20} /> : <PlusIcon size={20} />}
                 </button>
                 <button
                   onClick={() => setShowSources((v) => !v)}
-                  aria-label="Choose a source"
-                  title="Choose a source"
+                  aria-label={t("Choose a source")}
+                  title={t("Choose a source")}
                   className={cx('icon-btn !h-11 !w-11', showSources && '!border-white !bg-white !text-black')}
                 >
                   <ListIcon size={20} />
@@ -166,8 +167,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                     <div className="h-[3px] w-24 overflow-hidden rounded bg-white/30">
                       <div className="h-full bg-nf-red" style={{ width: `${Math.min(100, (playTarget.positionSeconds / playTarget.durationSeconds) * 100)}%` }} />
                     </div>
-                    {resumeLeft} min left
-                  </div>
+                    {resumeLeft} <Localized text={"min left"} /></div>
                 )}
               </div>
             </Hero>
@@ -175,8 +175,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
             {showSources && mainSpec && (
               <div className="animate-fadeIn px-6 pt-4 sm:px-10">
                 <p className="mb-2 text-sm text-[#b3b3b3]">
-                  Pick a specific release{type === 'tv' && playTarget ? ` for S${playTarget.season}:E${playTarget.episode}` : ''}. Best matches are listed first.
-                </p>
+                  <Localized text={"Pick a specific release"} />{type === 'tv' && playTarget ? ` for S${playTarget.season}:E${playTarget.episode}` : ''}<Localized text={". Best matches are listed first."} /></p>
                 <SourcePicker
                   spec={mainSpec}
                   onPick={(source) => play({ ...mainSpec, source })}
@@ -193,7 +192,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                   {data.year && <span className="text-[#bcbcbc]">{data.year}</span>}
                   {type === 'tv' && data.seasons?.length ? (
                     <span className="text-[#bcbcbc]">
-                      {data.seasons.length} Season{data.seasons.length > 1 ? 's' : ''}
+                      {data.seasons.length} <Localized text={"Season"} />{data.seasons.length > 1 ? 's' : ''}
                     </span>
                   ) : null}
                   {type === 'movie' && data.runtime ? <span className="text-[#bcbcbc]">{fmtRuntime(data.runtime)}</span> : null}
@@ -206,19 +205,19 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
               <div className="space-y-2 text-[13px] leading-snug">
                 {data.cast?.length > 0 && (
                   <p>
-                    <span className="text-[#777]">Cast: </span>
+                    <span className="text-[#777]"><Localized text={"Cast:"} suffix=" " /></span>
                     {data.cast.slice(0, 4).join(', ')}
                   </p>
                 )}
                 {data.creators?.length > 0 && (
                   <p>
-                    <span className="text-[#777]">Creators: </span>
+                    <span className="text-[#777]"><Localized text={"Creators:"} suffix=" " /></span>
                     {data.creators.join(', ')}
                   </p>
                 )}
                 {data.genres?.length > 0 && (
                   <p>
-                    <span className="text-[#777]">Genres: </span>
+                    <span className="text-[#777]"><Localized text={"Genres:"} suffix=" " /></span>
                     {data.genres.join(', ')}
                   </p>
                 )}
@@ -228,7 +227,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
             {type === 'tv' && data.seasons?.length > 0 && (
               <section className="px-6 pb-6 sm:px-10">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-2xl font-bold">Episodes</h3>
+                  <h3 className="text-2xl font-bold"><Localized text={"Episodes"} /></h3>
                   <div className="relative">
                     <select
                       value={season ?? ''}
@@ -282,8 +281,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                               <span className="mt-1 line-clamp-2 text-[13px] leading-snug text-[#d2d2d2]">{ep.overview}</span>
                               {pr?.completed && (
                                 <span className="mt-1 inline-flex items-center gap-1 text-xs text-[#46d369]">
-                                  <CheckIcon size={13} /> Watched
-                                </span>
+                                  <CheckIcon size={13} /> <Localized text={"Watched"} /></span>
                               )}
                             </span>
                           </button>
@@ -310,7 +308,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                     );
                   })}
                   {seasonData && !seasonData.loading && seasonData.list.length === 0 && (
-                    <p className="py-6 text-sm text-[#b3b3b3]">No episode information is available for this season.</p>
+                    <p className="py-6 text-sm text-[#b3b3b3]"><Localized text={"No episode information is available for this season."} /></p>
                   )}
                 </div>
               </section>
@@ -318,7 +316,7 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
 
             {data.similar?.length > 0 && (
               <section className="px-6 pb-10 sm:px-10">
-                <h3 className="mb-4 text-2xl font-bold">More Like This</h3>
+                <h3 className="mb-4 text-2xl font-bold"><Localized text={"More Like This"} /></h3>
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                   {data.similar.slice(0, 9).map((s) => (
                     <button

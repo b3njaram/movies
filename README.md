@@ -189,3 +189,50 @@ Only port 3111 needs to be exposed. The backend and TorrServer are reachable onl
 - **Content**: Prowlarr and TorrServer are general-purpose tools. Only stream content you have the right to access.
 - **Not included**: subtitles, and video transcoding (the picture is always streamed exactly as it is; only the audio can be converted).
 - Trailers on the home page are YouTube embeds and need internet access in the browser.
+
+## Phase 1 — Everyday usability (November 2026)
+
+This update is additive. **Do not replace your existing `.env`, `data/`, or Docker bind mounts.**
+The same React/Vite + Express + SQLite + Docker Compose architecture remains in place.
+
+### What's new
+
+- **Captions:** Open **CC** in the player to choose Off / English / Español. The app lists compatible `.srt` / `.vtt` *sidecar* files contained in the same torrent as the playing video and converts SRT to WebVTT on the backend. You can also load an SRT/VTT file from your device for the current viewing. Default caption language is saved per profile. **Limitations:** captions inside MKV containers are not extracted yet, and no online subtitle service is called. If a torrent has no matching sidecar, use a local subtitle file.
+- **Better source choice:** Before automatically trying a release, StreamHub uses the current browser's codec support and the profile's quality preference (Auto, 4K, 1080p, or 720p). It prefers compatible formats, learns the *release title* that played successfully on the device, and still lets you choose a source manually. Unknown codec labels remain best-effort; this does not add full video transcoding.
+- **Admin dashboard:** The earliest existing user (by SQLite user ID) becomes the initial administrator. On a new installation, the first account created through `./add-user.sh` becomes administrator. Administrators can create users, reset passwords, enable/disable non-admin accounts, and inspect basic service health and aggregate counters. Resetting a password or disabling a user invalidates previous sessions. Admin privileges are verified server-side for every request. `./add-user.sh` continues to work.
+- **Mobile PWA:** Users of supported browsers can install StreamHub from their browser. The static application shell can be cached, but video, downloads, login responses, watch history, and API traffic are *never* cached by the service worker. This is not offline movie playback.
+- **English/Spanish interface:** The header and login page have UI-language switches, with language saved per profile. Audio language and subtitle language are independent of the interface language.
+
+### Safe upgrade of an existing Mac mini installation
+
+Keep using `~/docker/movies/streamhub` if that is your running installation. You don't need to clone to a new folder. Before the first upgrade, make a database backup while the backend is stopped:
+
+```bash
+cd ~/docker/movies/streamhub
+sudo docker compose stop backend
+sudo mkdir -p "$HOME/streamhub-backups"
+sudo cp -a data/app "$HOME/streamhub-backups/app-$(date +%Y%m%d-%H%M%S)"
+sudo docker compose start backend
+
+git remote -v                  # must point to github.com/b3njaram/movies
+git status --short             # resolve local source changes before pulling
+git pull --ff-only origin main
+sudo docker compose config | grep -B1 -A1 'target: /app/data\|target: /config\|target: /opt/ts/config'
+# Compare these paths with: sudo docker inspect streamhub-backend prowlarr torrserver
+# If they are different, fix the mount references before recreating containers.
+sudo docker compose up -d --build
+```
+
+No new `.env` variables or volumes are required. The SQLite migration adds columns to the existing tables only; it preserves accounts, password hashes, profiles, lists, and viewing progress. The migration is designed to be repeatable. Do not run `docker compose down -v` or delete `data/`.
+
+### Verification
+
+The repository includes tests for safe subtitle matching and conversion, client-side compatibility sorting, and preservation of the legacy SQLite schema. Run:
+
+```bash
+node --test backend/test/*.test.js frontend/test/*.test.js
+python3 tests/migration.test.py
+cd frontend && npm install && npm run build
+```
+
+The GitHub Actions workflow builds the frontend and checks the tests on pushes and pull requests. Browser/video/device behavior should still be checked against a live Prowlarr/TorrServer instance after deployment.

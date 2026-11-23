@@ -1,8 +1,11 @@
+import { Localized } from './locale';
 import React, { useEffect, useState } from 'react';
 import { api } from './api';
 import { useApp } from './context';
 import { DownloadIcon, PlayIcon, VolumeIcon, WarningIcon } from './Icons';
 import { cx } from './utils';
+import { getRankedSources, getQualityPref, setQualityPref } from './compat';
+import { useLocale } from './locale';
 
 const QUALITY_STYLE = {
   '2160p': 'bg-purple-600',
@@ -43,6 +46,7 @@ export function LangChip({ lang, langMatch, langAssumed, className = '' }) {
 // English / Español switch for the profile's preferred audio language.
 export function LangToggle({ className = '' }) {
   const { profile, setLang } = useApp();
+  const { t } = useLocale();
   if (!profile || !setLang) return null;
   const btn = (code, label) => (
     <button
@@ -59,7 +63,7 @@ export function LangToggle({ className = '' }) {
   );
   return (
     <div className={cx('flex items-center gap-2 text-xs text-[#b3b3b3]', className)}>
-      Preferred audio
+      {t('Preferred audio language')}
       <span className="flex overflow-hidden rounded border border-white/30">
         {btn('en', 'English')}
         {btn('es', 'Español')}
@@ -78,6 +82,7 @@ const STATUS = {
 // One release found on the indexers, with its three actions:
 //   Play | Audio fix (play, converting the sound to AAC) | Download (to this device)
 export function SourceRow({ source, onPick, onPickFix, onDownload, status = null, compact = false }) {
+  const { t } = useLocale();
   const safeAudio = SAFE_AUDIO.has(source.audio);
   const st = status && STATUS[status.status];
   return (
@@ -100,18 +105,17 @@ export function SourceRow({ source, onPick, onPickFix, onDownload, status = null
               {source.audio}
             </span>
           )}
-          {st && <span className={cx('rounded px-1.5 py-px font-bold', st.cls)}>{st.text}</span>}
+          {st && <span className={cx('rounded px-1.5 py-px font-bold', st.cls)}>{t(st.text)}</span>}
         </span>
         {status?.reason && <span className="mt-0.5 block text-[11px] text-red-300/80">{status.reason}</span>}
-        {source.videoRisk && (
+        {(source.deviceWarning ?? source.videoRisk) && (
           <span className="mt-0.5 flex items-center gap-1 text-[11px] text-amber-400">
-            <WarningIcon size={12} /> HEVC/AV1 video — may not play in your browser
+            <WarningIcon size={12} /> {t('May not play on this device')}
           </span>
         )}
         {!source.videoRisk && source.audioRisk && (
           <span className="mt-0.5 flex items-center gap-1 text-[11px] text-amber-400">
-            <WarningIcon size={12} /> Sound may be missing in some browsers — use Audio fix
-          </span>
+            <WarningIcon size={12} /> <Localized text={"Sound may be missing in some browsers — use Audio fix"} /></span>
         )}
       </button>
 
@@ -120,7 +124,7 @@ export function SourceRow({ source, onPick, onPickFix, onDownload, status = null
           onClick={() => onPick(source)}
           className="flex items-center gap-1 rounded bg-white px-3 py-1.5 text-xs font-bold text-black transition-colors hover:bg-white/75"
         >
-          <PlayIcon size={13} /> Play
+          <PlayIcon size={13} /> {t('Play')}
         </button>
         {onPickFix && (
           <button
@@ -128,7 +132,7 @@ export function SourceRow({ source, onPick, onPickFix, onDownload, status = null
             title="Play with audio fix: keeps the picture as it is and converts the sound to AAC, for releases that play without sound"
             className="flex items-center gap-1 rounded border border-white/40 px-2.5 py-1.5 text-xs font-bold transition-colors hover:border-white hover:bg-white/10"
           >
-            <VolumeIcon size={14} /> Audio fix
+            <VolumeIcon size={14} /> {t('Audio fix')}
           </button>
         )}
         {onDownload && (
@@ -150,9 +154,8 @@ export function SkippedNote({ skipped }) {
   if (!skipped?.length) return null;
   return (
     <p className="px-3 pb-2 pt-2 text-[11px] text-[#808080]">
-      {skipped.length} indexer{skipped.length > 1 ? 's' : ''} did not answer in time ({skipped.slice(0, 4).join(', ')}
-      {skipped.length > 4 ? '…' : ''}), so this list may be incomplete.
-    </p>
+      {skipped.length} indexer{skipped.length > 1 ? 's' : ''} <Localized text={"did not answer in time ("} />{skipped.slice(0, 4).join(', ')}
+      {skipped.length > 4 ? '…' : ''}<Localized text={"), so this list may be incomplete."} /></p>
   );
 }
 
@@ -161,6 +164,8 @@ export function SkippedNote({ skipped }) {
 export default function SourcePicker({ spec, onPick, onPickFix, onDownload, statusOf, preloaded, showLang = true, compact = false, className = '' }) {
   const { profile } = useApp();
   const lang = profile?.lang || 'en';
+  const { t } = useLocale();
+  const [quality, setQuality] = useState(getQualityPref);
   const usable = preloaded && preloaded.lang === lang ? preloaded : null;
   const [state, setState] = useState(() =>
     usable ? { loading: false, results: usable.results, skipped: usable.skipped || [], error: '' } : { loading: true, results: [], skipped: [], error: '' }
@@ -193,19 +198,28 @@ export default function SourcePicker({ spec, onPick, onPickFix, onDownload, stat
 
   return (
     <div className={cx('rounded-md bg-[#1f1f1f] p-2', className)}>
-      {showLang && <LangToggle className="px-3 pb-1 pt-1" />}
+      <div className="flex flex-wrap items-center gap-3 px-3 pb-2 pt-1">
+        {showLang && <LangToggle />}
+        <label className="flex items-center gap-2 text-xs text-[#b3b3b3]">
+          {t('Compatible quality')}
+          <select aria-label={t('Compatible quality')} className="rounded border border-white/30 bg-[#222] px-2 py-1 text-white"
+            value={quality} onChange={(e) => { setQuality(e.target.value); setQualityPref(e.target.value); }}>
+            {['auto','2160p','1080p','720p'].map(q => <option key={q} value={q}>{q === 'auto' ? t('Auto') : q === '2160p' ? '4K' : q}</option>)}
+          </select>
+        </label>
+      </div>
       {state.loading && (
         <div className="flex items-center gap-3 px-3 py-6 text-sm text-[#b3b3b3]">
           <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-nf-red" />
-          Searching your indexers…
+          {t('Searching your indexers…')}
         </div>
       )}
-      {state.error && <p className="px-3 py-4 text-sm text-[#e87c03]">{state.error}</p>}
+      {state.error && <p className="px-3 py-4 text-sm text-[#e87c03]">{t(state.error)}</p>}
       {!state.loading && !state.error && state.results.length === 0 && (
-        <p className="px-3 py-4 text-sm text-[#b3b3b3]">No sources found for this title on your indexers.</p>
+        <p className="px-3 py-4 text-sm text-[#b3b3b3]">{t('No sources found for this title on your indexers.')}</p>
       )}
       <div className={cx('thin-scroll', !compact && 'max-h-[340px] overflow-y-auto')}>
-        {state.results.map((s) => (
+        {getRankedSources(state.results).map((s) => (
           <SourceRow key={s.id} source={s} onPick={onPick} onPickFix={onPickFix} onDownload={onDownload} status={statusOf ? statusOf(s) : null} compact={compact} />
         ))}
       </div>

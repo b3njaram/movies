@@ -1,3 +1,4 @@
+import { Localized, useLocale } from './locale';
 import React from 'react';
 import { DownloadIcon, CloseIcon } from './Icons';
 import SourcePicker, { LangChip, LangToggle } from './SourcePicker';
@@ -13,6 +14,7 @@ const STATE = {
 };
 
 function AttemptRow({ a, index, onDownload, onDownloadCurrent }) {
+  const { t } = useLocale();
   const st = STATE[a.status] || STATE.trying;
   const playing = a.status === 'playing';
   return (
@@ -30,7 +32,7 @@ function AttemptRow({ a, index, onDownload, onDownloadCurrent }) {
             {a.indexer && <span>{a.indexer}</span>}
           </div>
           <p className={cx('mt-1 text-xs font-bold', st.tone)}>
-            {st.label}
+            {t(st.label)}
             {a.reason ? <span className="font-normal text-white/60"> — {a.reason}</span> : null}
           </p>
         </div>
@@ -42,7 +44,7 @@ function AttemptRow({ a, index, onDownload, onDownloadCurrent }) {
           playing ? 'bg-white text-black hover:bg-white/80' : 'border border-white/40 hover:border-white hover:bg-white/10'
         )}
       >
-        <DownloadIcon size={14} /> {playing ? 'Download this file' : 'Download'}
+        <DownloadIcon size={14} /> {t(playing ? 'Download this file' : 'Download')}
       </button>
     </div>
   );
@@ -56,20 +58,20 @@ export default function SourcesDrawer({ spec, attempts, preloaded, statusOf, onC
       aria-label="Sources"
       className="absolute inset-y-0 right-0 z-30 flex w-full animate-slideLeft flex-col border-l border-white/10 bg-black/90 shadow-2xl backdrop-blur sm:w-[440px]"
     >
-      <div className="flex items-center justify-between px-4 pb-2 pt-4">
-        <h3 className="text-lg font-bold">Sources</h3>
+      <div className="flex items-center justify-between px-4 pb-2 pt-[max(1rem,env(safe-area-inset-top))]">
+        <h3 className="text-lg font-bold"><Localized text={"Sources"} /></h3>
         <button onClick={onClose} aria-label="Close sources" className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/15">
           <CloseIcon size={18} />
         </button>
       </div>
 
-      <div className="thin-scroll flex-1 space-y-5 overflow-y-auto px-4 pb-8">
+      <div className="thin-scroll flex-1 space-y-5 overflow-y-auto px-4 pb-[max(2rem,env(safe-area-inset-bottom))]">
         <LangToggle />
 
         <section>
-          <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-white/50">This viewing</h4>
+          <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-white/50"><Localized text={"This viewing"} /></h4>
           {attempts.length === 0 ? (
-            <p className="text-sm text-[#b3b3b3]">Nothing has been tried yet.</p>
+            <p className="text-sm text-[#b3b3b3]"><Localized text={"Nothing has been tried yet."} /></p>
           ) : (
             <div className="space-y-2">
               {attempts.map((a, i) => (
@@ -81,7 +83,7 @@ export default function SourcesDrawer({ spec, attempts, preloaded, statusOf, onC
 
         {spec.type !== 'raw' && (
           <section>
-            <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-white/50">All sources</h4>
+            <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-white/50"><Localized text={"All sources"} /></h4>
             <SourcePicker
               spec={spec}
               preloaded={preloaded}

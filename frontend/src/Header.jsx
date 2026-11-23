@@ -3,6 +3,8 @@ import Logo from './Logo';
 import Avatar from './Avatar';
 import { ChevronDown, CloseIcon, PencilIcon, SearchIcon } from './Icons';
 import { cx } from './utils';
+import { useLocale } from './locale';
+import { useApp } from './context';
 
 export const NAV = [
   ['home', 'Home'],
@@ -12,7 +14,10 @@ export const NAV = [
   ['list', 'My List'],
 ];
 
-export default function Header({ page, onNav, query, onQuery, profile, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
+export default function Header({ page, onNav, query, onQuery, profile, isAdmin = false, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
+  const { t } = useLocale();
+  const { setUiLang } = useApp();
+  const navItems = isAdmin ? [...NAV, ['admin', 'Admin']] : NAV;
   const [scrolled, setScrolled] = useState(false);
   const [text, setText] = useState(query || '');
   const [searchOpen, setSearchOpen] = useState(Boolean(query));
@@ -63,7 +68,7 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
     onQueryRef.current('');
   };
 
-  const activeLabel = NAV.find(([id]) => id === page)?.[1] || 'Browse';
+  const activeLabel = navItems.find(([id]) => id === page)?.[1] || 'Browse';
 
   return (
     <header
@@ -74,13 +79,13 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
       )}
     >
       <div className="flex h-[58px] items-center px-[4%] sm:h-[68px]">
-        <button onClick={() => onNav('home')} aria-label="Home" className="mr-4 shrink-0 sm:mr-8">
+        <button onClick={() => onNav('home')} aria-label={t("Home")} className="mr-4 shrink-0 sm:mr-8">
           <Logo size="text-[28px] sm:text-[34px]" />
         </button>
 
         {/* desktop nav */}
         <nav className="hidden items-center gap-5 md:flex">
-          {NAV.map(([id, label]) => (
+          {navItems.map(([id, label]) => (
             <button
               key={id}
               onClick={() => onNav(id)}
@@ -89,7 +94,7 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
                 page === id && !query ? 'font-bold text-white' : 'text-[#e5e5e5]'
               )}
             >
-              {label}
+              {t(label)}
             </button>
           ))}
         </nav>
@@ -97,12 +102,12 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
         {/* mobile nav */}
         <div className="relative md:hidden">
           <button onClick={() => setMenu(menu === 'browse' ? null : 'browse')} className="flex items-center gap-1 text-sm font-bold">
-            {activeLabel}
+            {t(activeLabel)}
             <ChevronDown size={16} className={cx('transition-transform', menu === 'browse' && 'rotate-180')} />
           </button>
           {menu === 'browse' && (
             <div className="absolute left-0 top-9 w-44 animate-dropIn border-t-2 border-white bg-black/95 py-2">
-              {NAV.map(([id, label]) => (
+              {navItems.map(([id, label]) => (
                 <button
                   key={id}
                   onClick={() => {
@@ -111,22 +116,22 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
                   }}
                   className={cx('block w-full px-4 py-2.5 text-left text-sm hover:bg-white/10', page === id ? 'font-bold' : 'text-[#b3b3b3]')}
                 >
-                  {label}
+                  {t(label)}
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        <div className="ml-auto flex items-center gap-4 sm:gap-5">
+        <div className="ml-auto flex min-w-0 items-center gap-2 sm:gap-5">
           {canSearch && (
             <div
               className={cx(
                 'flex items-center border transition-all duration-300',
-                searchOpen ? 'w-[190px] border-white bg-black/80 sm:w-[260px]' : 'w-8 border-transparent bg-transparent'
+                searchOpen ? 'w-[min(45vw,190px)] border-white bg-black/80 sm:w-[260px]' : 'w-8 border-transparent bg-transparent'
               )}
             >
-              <button onClick={() => setSearchOpen(true)} aria-label="Search" className="flex h-8 w-8 shrink-0 items-center justify-center">
+              <button onClick={() => setSearchOpen(true)} aria-label={t("Search")} className="flex h-8 w-8 shrink-0 items-center justify-center">
                 <SearchIcon size={22} />
               </button>
               <input
@@ -135,17 +140,22 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Escape' && clearSearch()}
                 onBlur={() => !text && setSearchOpen(false)}
-                placeholder="Titles, people, genres"
+                placeholder={t("Titles, people, genres")}
                 className={cx('min-w-0 flex-1 bg-transparent pr-1 text-sm text-white outline-none placeholder:text-[#8c8c8c]', !searchOpen && 'hidden')}
               />
               {searchOpen && text && (
-                <button onClick={clearSearch} aria-label="Clear search" className="flex h-8 w-8 shrink-0 items-center justify-center">
+                <button onClick={clearSearch} aria-label={t("Clear search")} className="flex h-8 w-8 shrink-0 items-center justify-center">
                   <CloseIcon size={16} />
                 </button>
               )}
             </div>
           )}
 
+          <button className="shrink-0 rounded border border-white/30 px-2 py-1 text-xs font-bold text-white/85 hover:bg-white/10"
+            aria-label={t('Change language')} title={t('Change language')}
+            onClick={() => setUiLang(profile.uiLang === 'es' ? 'en' : 'es')}>
+            {profile.uiLang === 'es' ? 'EN' : 'ES'}
+          </button>
           <div className="relative" onMouseEnter={() => window.matchMedia('(hover:hover)').matches && setMenu('profile')} onMouseLeave={() => menu === 'profile' && setMenu(null)}>
             <button
               onClick={() =>
@@ -153,7 +163,7 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
                 window.matchMedia('(hover:hover)').matches ? setMenu('profile') : setMenu(menu === 'profile' ? null : 'profile')
               }
               className="flex items-center gap-2"
-              aria-label="Profile menu"
+              aria-label={t("Profile menu")}
             >
               <Avatar index={profile.avatar} kids={profile.kids} size={32} rounded="rounded" />
               <ChevronDown size={16} className={cx('hidden transition-transform duration-200 sm:block', menu === 'profile' && 'rotate-180')} />
@@ -184,11 +194,11 @@ export default function Header({ page, onNav, query, onQuery, profile, profiles,
                     className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm text-[#e5e5e5] hover:underline"
                   >
                     <PencilIcon size={22} className="ml-1" />
-                    Manage Profiles
+                    {t("Manage Profiles")}
                   </button>
                   <div className="my-2 border-t border-white/20" />
                   <button onClick={onLogout} className="block w-full px-4 py-2 text-center text-sm text-[#e5e5e5] hover:underline">
-                    Sign out of StreamHub
+                    {t("Sign out of StreamHub")}
                   </button>
                 </div>
               </div>

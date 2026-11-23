@@ -18,7 +18,7 @@ const hash = hashPassword(password);
 const existing = getUserByUsername(username);
 
 if (existing) {
-  db.prepare('UPDATE users SET password_hash = ? WHERE username = ?').run(hash, username);
+  db.prepare('UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE username = ?').run(hash, username);
   console.log(`Password updated for existing user "${username}".`);
 } else {
   createUser(username, hash);

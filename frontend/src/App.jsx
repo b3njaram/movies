@@ -1,3 +1,4 @@
+import { Localized } from './locale';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, setProfileId, getProfileId, BASE } from './api';
 import { AppContext } from './context';
@@ -10,6 +11,9 @@ import Browse, { ListPage } from './Browse';
 import SearchView from './SearchView';
 import TitleModal from './TitleModal';
 import Player from './Player';
+import Admin from './Admin';
+import InstallPrompt from './InstallPrompt';
+import { useLocale } from './locale';
 import { CloseIcon } from './Icons';
 
 function Splash() {
@@ -21,7 +25,8 @@ function Splash() {
 }
 
 export default function App() {
-  const [auth, setAuth] = useState({ status: 'loading', username: null });
+  const { setLang: setLocale, t } = useLocale();
+  const [auth, setAuth] = useState({ status: 'loading', username: null, isAdmin: false });
   const [profiles, setProfiles] = useState([]);
   const [profile, setProfile] = useState(null);
   const [choosing, setChoosing] = useState(true);
@@ -54,7 +59,7 @@ export default function App() {
 
   const resetSession = useCallback(() => {
     setProfileId(null);
-    setAuth({ status: 'out', username: null });
+    setAuth({ status: 'out', username: null, isAdmin: false });
     setProfiles([]);
     setProfile(null);
     setChoosing(true);
@@ -82,19 +87,20 @@ export default function App() {
         if (!alive) return;
         const list = await loadProfiles();
         const remembered = list.find((p) => String(p.id) === getProfileId());
-        setAuth({ status: 'in', username: me.username });
+        setAuth({ status: 'in', username: me.username, isAdmin: Boolean(me.isAdmin) });
         if (remembered) {
           setProfile(remembered);
+          setLocale(remembered.uiLang === 'es' ? 'es' : 'en');
           setChoosing(false);
         }
       } catch {
-        if (alive) setAuth({ status: 'out', username: null });
+        if (alive) setAuth({ status: 'out', username: null, isAdmin: false });
       }
     })();
     return () => {
       alive = false;
     };
-  }, [loadProfiles]);
+  }, [loadProfiles, setLocale]);
 
   useEffect(() => {
     window.addEventListener('sh:unauthorized', resetSession);
@@ -102,15 +108,15 @@ export default function App() {
   }, [resetSession]);
 
   const handleLogin = useCallback(
-    async (username) => {
+    async (username, isAdmin) => {
       setProfileId(null);
       try {
         await loadProfiles();
         setProfile(null);
         setChoosing(true);
-        setAuth({ status: 'in', username });
+        setAuth({ status: 'in', username, isAdmin: Boolean(isAdmin) });
       } catch {
-        setAuth({ status: 'out', username: null });
+        setAuth({ status: 'out', username: null, isAdmin: false });
       }
     },
     [loadProfiles]
@@ -131,8 +137,9 @@ export default function App() {
     setModal(null);
     setPlayback(null);
     setBannerHidden(false);
+    setLocale(p?.uiLang === 'es' ? 'es' : 'en');
     window.scrollTo(0, 0);
-  }, []);
+  }, [setLocale]);
 
   const reloadProfiles = useCallback(async () => {
     const list = await loadProfiles();
@@ -147,6 +154,8 @@ export default function App() {
       return fresh;
     });
   }, [loadProfiles]);
+
+  useEffect(() => { if (profile) setLocale(profile.uiLang === 'es' ? 'es' : 'en'); }, [profile?.uiLang, setLocale]);
 
   // Per-profile data
   useEffect(() => {
@@ -259,7 +268,7 @@ export default function App() {
       setProfile(after);
       setProfiles((list) => list.map((p) => (p.id === after.id ? after : p)));
       try {
-        await api(`/api/profiles/${after.id}`, { method: 'PUT', body: { name: after.name, avatar: after.avatar, kids: after.kids, lang } });
+        await api(`/api/profiles/${after.id}`, { method: 'PUT', body: { ...after } });
         notify(lang === 'es' ? 'Preferred audio language: Español' : 'Preferred audio language: English');
       } catch (e) {
         setProfile(before);
@@ -317,9 +326,29 @@ export default function App() {
     [myList, notify]
   );
 
+  const saveProfilePreference = useCallback(async (field, value) => {
+    if (!profile || profile[field] === value) return;
+    const before = profile;
+    const after = {...profile, [field]: value};
+    setProfile(after);
+    setProfiles(list => list.map(p => p.id === after.id ? after : p));
+    if (field === 'uiLang') setLocale(value);
+    try {
+      await api(`/api/profiles/${after.id}`, {method:'PUT', body: after});
+    } catch (e) {
+      setProfile(before);
+      setProfiles(list => list.map(p => p.id === before.id ? before : p));
+      if (field === 'uiLang') setLocale(before.uiLang || 'en');
+      notify(e.message);
+    }
+  }, [profile, notify, setLocale]);
+
+  const setSubLang = useCallback(value => saveProfilePreference('subLang', value), [saveProfilePreference]);
+  const setUiLang = useCallback(value => saveProfilePreference('uiLang', value), [saveProfilePreference]);
+
   const ctx = useMemo(
-    () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang }),
-    [profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang]
+    () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang, setSubLang, setUiLang }),
+    [profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang, setSubLang, setUiLang]
   );
 
   const nav = (id) => {
@@ -368,6 +397,7 @@ export default function App() {
           query={query}
           onQuery={setQuery}
           profile={profile}
+          isAdmin={auth.isAdmin}
           profiles={profiles}
           onSwitch={selectProfile}
           onManage={() => {
@@ -379,7 +409,7 @@ export default function App() {
 
         {problem && !bannerHidden && (
           <div className="fixed inset-x-0 top-[58px] z-50 flex animate-dropIn items-center justify-center gap-3 bg-[#b9090b] px-4 py-2 text-center text-sm sm:top-[68px]">
-            <span>{problem} Playback and search may not work until this is fixed.</span>
+            <span>{problem} <Localized text={"Playback and search may not work until this is fixed."} /></span>
             <button onClick={() => setBannerHidden(true)} aria-label="Dismiss" className="shrink-0 opacity-80 hover:opacity-100">
               <CloseIcon size={16} />
             </button>
@@ -387,7 +417,9 @@ export default function App() {
         )}
 
         <main>
-          {searching ? (
+          {page === 'admin' && auth.isAdmin ? (
+            <Admin />
+          ) : searching ? (
             <SearchView query={query.trim()} />
           ) : page === 'list' ? (
             <ListPage />
@@ -399,6 +431,7 @@ export default function App() {
         {modal && <TitleModal target={modal} onClose={closeTop} onOpenOther={(i) => setModal({ type: i.type, id: i.id })} />}
         {playback && <Player key={playback.key} spec={playback.spec} onClose={closeTop} onNext={playNext} />}
 
+        <InstallPrompt />
         {toast && (
           <div key={toast.id} className="fixed bottom-6 left-6 z-[300] max-w-[80vw] animate-fadeInUp rounded bg-white px-5 py-3 text-sm font-medium text-black shadow-2xl">
             {toast.text}
