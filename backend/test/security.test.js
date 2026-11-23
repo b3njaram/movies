@@ -10,6 +10,8 @@ test('Cross-origin browser mutations are rejected while same-origin and CLI requ
   assert.equal(isAllowedMutation('DELETE','null','movies.example.com','none'),false);
   assert.equal(isAllowedMutation('PUT',null,'movies.example.com','cross-site'),false);
   assert.equal(isAllowedMutation('POST',null,'movies.example.com',undefined),true);
+  assert.equal(isAllowedMutation('POST','http://macmini2012:3111','macmini2012:3111','same-origin'),true);
+  assert.equal(isAllowedMutation('POST','http://macmini2012:3000','macmini2012:3111','same-site'),false);
   assert.equal(isAllowedMutation('GET','https://attacker.example','movies.example.com','cross-site'),true);
   assert.equal(isAllowedMutation('POST','https://movies.example.com.evil','movies.example.com','same-site'),false);
   assert.equal(isAllowedMutation('POST','javascript:alert(1)','movies.example.com',undefined),false);
