@@ -40,7 +40,10 @@ export function describeBadResponse(status, text) {
   if (/^(1020|1010|1015|1006|1007|1008|1009)$/.test(code) || /blocked|attention required/i.test(title + text.slice(0, 4000))) {
     return `Cloudflare's firewall blocked this request (error ${code}). In the Cloudflare dashboard, open Security \u2192 Events to see which rule did it.${rayTxt}`;
   }
-  if (/^(502|503|504|52\d|530)$/.test(code)) {
+  if (code === '504') {
+    return `Cloudflare error 504: the server did not answer in time. This can happen when a source has no peers or TorrServer is slow, even if Docker is running. Try another source or test through your LAN/Tailscale.${rayTxt}`;
+  }
+  if (/^(502|503|52\d|530)$/.test(code)) {
     return `Cloudflare error ${code}: it could not get an answer from your server. Check that the Docker containers are running.${rayTxt}`;
   }
   return `Cloudflare answered with error ${code} instead of your server.${rayTxt}`;
@@ -70,6 +73,7 @@ export async function api(path, { method = 'GET', body, signal } = {}) {
     });
   } catch (e) {
     if (e.name === 'AbortError') throw e;
+    if (e.name === 'TimeoutError') throw new ApiError('TorrServer took too long to prepare this source. Trying another release may help.', 504, 'SOURCE_TIMEOUT');
     throw new ApiError('Cannot reach the server. Check your connection.', 0, 'NETWORK');
   }
 

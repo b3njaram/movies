@@ -41,6 +41,7 @@ import {
   getLocalizedTitle, getDiscover, getRecommendations, getTvAirStatus,
 } from './tmdb.js';
 import { searchSources, lookupRef, bytesToSize, describeRelease } from './sources.js';
+import {pickPlayableFile} from './playback-selection.js';
 import { listAccounts, createAccount, updateAccount, adminSummary } from './admin.js';
 import { validatedFileRef, listSubtitleFiles, toVtt } from './subtitles.js';
 import { allowedByRating, maxAgeValue, cleanMarkers, safeContentKey, cleanDiscoverFilters } from './premium.js';
@@ -868,7 +869,7 @@ async function fetchTorrentOrMagnet(url) {
     current.host = base.host;
   }
 
-  const overall = AbortSignal.timeout(25000); // all hops together, so one request never nears Cloudflare's 100 s limit
+  const overall = AbortSignal.timeout(15000); // bound indexer lookups before Cloudflare times out
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetch(current, {
       redirect: 'manual',
@@ -894,7 +895,7 @@ async function fetchTorrentOrMagnet(url) {
 
 async function addToTorrServer(resolved) {
   if (resolved.kind === 'magnet') {
-    return tsPost('/torrents', { action: 'add', link: resolved.value, save_to_db: false }, 40000);
+    return tsPost('/torrents', { action: 'add', link: resolved.value, save_to_db: false }, 20000);
   }
   const form = new FormData();
   form.append('save', 'false');
@@ -904,7 +905,7 @@ async function addToTorrServer(resolved) {
     res = await fetch(`${TORRSERVER_URL}/torrent/upload`, {
       method: 'POST',
       body: form,
-      signal: AbortSignal.timeout(40000),
+      signal: AbortSignal.timeout(20000),
     });
   } catch (e) {
     throw httpError(502, `TorrServer is not reachable (${e.message})`);
@@ -913,39 +914,18 @@ async function addToTorrServer(resolved) {
   return res.json();
 }
 
-async function waitForFiles(hash, tries = 20) {
-  for (let i = 0; i < tries; i++) {
-    const info = await tsPost('/torrents', { action: 'get', hash }).catch(() => null);
+async function waitForFiles(hash, tries = 12) {
+  // Bound *each* metadata request and the entire retry loop. Previously each
+  // of 20 retries could wait 20s, leaving Cloudflare to return generic 504s.
+  const deadline = Date.now() + 26000;
+  for (let i = 0; i < tries && Date.now() < deadline; i++) {
+    const timeout = Math.min(1800, Math.max(250, deadline - Date.now()));
+    const info = await tsPost('/torrents', { action: 'get', hash }, timeout).catch(() => null);
     if (info?.file_stats?.length) return info;
-    await new Promise((r) => setTimeout(r, 1000));
+    if (Date.now() >= deadline) break;
+    await new Promise(r => setTimeout(r, 750));
   }
-  throw httpError(504, 'No peers answered in time for this source.');
-}
-
-const VIDEO_EXT = /\.(mp4|mkv|avi|mov|webm|m4v|ts|wmv)$/i;
-const largest = (files) => [...files].sort((a, b) => (b.length || 0) - (a.length || 0))[0];
-
-function pickFile(fileStats, season, episode) {
-  const all = fileStats.map((f) => ({ ...f, path: f.path || f.name || '' }));
-  const videos = all.filter((f) => VIDEO_EXT.test(f.path) && !/\bsample\b/i.test(f.path));
-  const pool = videos.length ? videos : all;
-  if (!pool.length) return null;
-
-  if (season != null && episode != null) {
-    const s = season;
-    const e = episode;
-    const patterns = [
-      new RegExp(`s0*${s}[ ._-]*e0*${e}(?!\\d)`, 'i'),
-      new RegExp(`(?:^|[^\\d])0*${s}x0*${e}(?!\\d)`, 'i'),
-      new RegExp(`season[ ._-]*0*${s}[^\\d].*?(?:episode|ep|e)[ ._-]*0*${e}(?!\\d)`, 'i'),
-    ];
-    for (const re of patterns) {
-      const hits = pool.filter((f) => re.test(f.path));
-      if (hits.length) return largest(hits);
-    }
-    if (pool.length > 1) throw httpError(404, `Season ${s} episode ${e} was not found inside this torrent.`);
-  }
-  return largest(pool);
+  throw httpError(504, 'TorrServer did not receive this torrent\'s file list in time. The source may have no peers; trying a different release is recommended.');
 }
 
 app.post('/api/stream', withProfile, wrap(async (req, res) => {
@@ -961,8 +941,8 @@ app.post('/api/stream', withProfile, wrap(async (req, res) => {
   touch(hash);
 
   const info = resolved.file_stats?.length ? resolved : await waitForFiles(hash);
-  const file = pickFile(info.file_stats, season ?? null, episode ?? null);
-  if (!file) throw httpError(404, 'No playable video file was found in this torrent.');
+  const file = pickPlayableFile(info.file_stats, season ?? null, episode ?? null);
+  if (!file) throw httpError(422, 'No video file matched this episode. This torrent may contain only subtitles, samples, or another episode.');
   // Grant access only after finding a playable file for this approved title.
   recordEvent('playback_started',req.profile.id);
   if (req.profile.maxAge < 18) grantHash(req.user.id,req.profile.id,hash);
@@ -1165,7 +1145,7 @@ function runProbe(url) {
     const timer = setTimeout(() => {
       p.kill('SIGKILL');
       reject(httpError(504, 'Timed out reading the file. Are there peers for this torrent?'));
-    }, 45000);
+    }, 20000);
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
     p.on('error', (e) => {

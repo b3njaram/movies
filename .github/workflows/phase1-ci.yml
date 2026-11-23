@@ -39,6 +39,7 @@ jobs:
           node --check backend/community-rules.js
           node --check backend/local-media.js
           node --check backend/local-media-rules.js
+          node --check backend/playback-selection.js
           node --check backend/advanced-rules.js
           node --check backend/advanced-db.js
           node --check backend/advanced-worker.js

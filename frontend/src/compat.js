@@ -37,6 +37,7 @@ export function rankSourcesForDevice(sources, { support = {}, quality = 'auto', 
     if (src.codec === 'AV1' && !support.av1) bonus -= 175;
     if (src.codec === 'H.264' && support.h264) bonus += 22;
     if (src.audioRisk) bonus -= 32;
+    if (src.containerRisk) bonus -= 220; // AVI and WMV usually require video conversion
     if (['AAC','Opus','MP3'].includes(src.audio)) bonus += 15;
     if (remembered && src.title === remembered) bonus += 80;
     if (quality !== 'auto') {
