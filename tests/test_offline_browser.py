@@ -13,12 +13,12 @@ from playwright.sync_api import sync_playwright, expect
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def mp4_sample(destination):
+def webm_sample(destination):
     subprocess.run([
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
         '-i', 'testsrc2=size=160x90:rate=10:duration=2',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart', str(destination),
+        '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '8',
+        '-b:v', '280k', '-an', str(destination),
     ], check=True, timeout=25)
 
 
@@ -32,8 +32,8 @@ def main():
             <body><h1>Test shell</h1><script>
             navigator.serviceWorker.register('/sw.js');
             </script></body></html>''')
-        clip = site / 'sample.mp4'
-        mp4_sample(clip)
+        clip = site / 'sample.webm'
+        webm_sample(clip)
         source = clip.read_bytes()
 
         class Handler(http.server.SimpleHTTPRequestHandler):
@@ -43,7 +43,7 @@ def main():
             def do_GET(self):
                 if self.path.startswith('/api/local-media/stream/1'):
                     self.send_response(200)
-                    self.send_header('Content-Type', 'video/mp4')
+                    self.send_header('Content-Type', 'video/webm')
                     self.send_header('Content-Length', str(len(source)))
                     self.send_header('Cache-Control', 'no-store')
                     self.end_headers()
@@ -95,7 +95,11 @@ def main():
                 expect(page.get_by_text('End to end movie')).to_be_visible(timeout=10000)
                 print('E2E: offline navigation succeeded', flush=True)
                 page.get_by_role('button', name='Play offline').click()
-                page.wait_for_function("document.querySelector('video').readyState >= 1", timeout=15000)
+                try:
+                    page.wait_for_function("document.querySelector('video').readyState >= 1", timeout=15000)
+                except Exception:
+                    details = page.locator('video').evaluate('el => ({src:el.currentSrc,readyState:el.readyState,networkState:el.networkState,error:el.error?.message,code:el.error?.code,canWebM:el.canPlayType("video/webm")})')
+                    raise AssertionError(f'Offline video did not load: {details}')
                 assert page.locator('video').evaluate('el => el.currentSrc.startsWith("blob:")')
                 print('PASS: offline install, authenticated-style download, rejection, airplane-mode reload, video playback')
                 browser.close()
