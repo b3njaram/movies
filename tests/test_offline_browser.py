@@ -16,12 +16,12 @@ from playwright.sync_api import sync_playwright, expect
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def mp4_sample(destination):
+def webm_sample(destination):
     subprocess.run([
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
         '-i', 'testsrc2=size=160x90:rate=10:duration=2',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart', str(destination),
+        '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '8',
+        '-b:v', '250k', '-pix_fmt', 'yuv420p', str(destination),
     ], check=True, timeout=25)
 
 
@@ -35,8 +35,8 @@ def main():
             <body><h1>Test shell</h1><script>
             navigator.serviceWorker.register('/sw.js');
             </script></body></html>''')
-        clip = site / 'sample.mp4'
-        mp4_sample(clip)
+        clip = site / 'sample.webm'
+        webm_sample(clip)
         source = clip.read_bytes()
         ranges = []
 
@@ -54,7 +54,7 @@ def main():
                         return
                     ranges.append(start)
                     self.send_response(206 if start else 200)
-                    self.send_header('Content-Type', 'video/mp4')
+                    self.send_header('Content-Type', 'video/webm')
                     self.send_header('ETag', '"sample-v1"')
                     self.send_header('Accept-Ranges', 'bytes')
                     if start:
@@ -109,6 +109,7 @@ def main():
                 assert len(interrupted) == 1 and interrupted[0]['bytes'] > 0, interrupted
                 # Reopen the page and resume from the saved byte position.
                 page.reload()
+                assert page.evaluate("() => document.createElement('video').canPlayType('video/webm; codecs=vp8') !== ''")
                 item = page.evaluate('''async () => {
                     const mod = await import('/offline-store.js');
                     return mod.downloadOfflineVideo({src:'/api/local-media/stream/1',title:'End to end movie',
