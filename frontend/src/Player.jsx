@@ -1,3 +1,4 @@
+import { Localized } from './locale';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, BASE, getProfileId, sendBeaconJson } from './api';
 import { useApp } from './context';
@@ -20,6 +21,8 @@ import {
 import SourcesDrawer from './SourcesDrawer';
 import { LangChip } from './SourcePicker';
 import { contentKeyOf, cx, fmtSpeed, fmtTime } from './utils';
+import { getRankedSources, rememberSuccessfulSource } from './compat';
+import { useLocale } from './locale';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -73,7 +76,8 @@ function trackLabel(t) {
 }
 
 export default function Player({ spec, onClose, onNext }) {
-  const { notify, download } = useApp();
+  const { notify, download, profile, setSubLang } = useApp();
+  const { t } = useLocale();
 
   const wrapRef = useRef(null);
   const videoRef = useRef(null);
@@ -137,9 +141,14 @@ export default function Player({ spec, onClose, onNext }) {
   const [fixBusy, setFixBusy] = useState(false);
   const [audioMenu, setAudioMenu] = useState(false);
   const [noAudioHint, setNoAudioHint] = useState(false);
+  const [subtitleFiles, setSubtitleFiles] = useState([]);
+  const [subMenuOpen, setSubMenuOpen] = useState(false);
+  const [localSubtitle, setLocalSubtitle] = useState(null);
+  const subtitleInput = useRef(null);
+  const subtitleUrl = useRef(null);
 
   const contentKey = contentKeyOf(spec);
-  menuOpenRef.current = rateMenu || pickerOpen || audioMenu;
+  menuOpenRef.current = rateMenu || pickerOpen || audioMenu || subMenuOpen;
   forcedRef.current = forced;
 
   const markAttempt = useCallback((link, patch = {}, { fill = false } = {}) => {
@@ -340,7 +349,7 @@ export default function Player({ spec, onClose, onNext }) {
             params.set('episode', spec.episode);
           }
           const found = await api(`/api/sources?${params}`);
-          const { results } = found;
+          const results = getRankedSources(found.results, contentKey);
           if (!cancelled) setSearched({ results: found.results, skipped: found.skipped || [], lang: found.lang });
           const list = results
             .filter((r) => r.seeders > 0 && r.link !== spec.magnet && !failedRef.current.has(r.link))
@@ -425,6 +434,8 @@ export default function Player({ spec, onClose, onNext }) {
       }
       fixOnRef.current = useFix;
       setFixOn(useFix);
+      setSubtitleFiles([]);
+      setLocalSubtitle(null);
       setStream(data);
       setMessage('Buffering…');
       setPhase('ready');
@@ -435,6 +446,52 @@ export default function Player({ spec, onClose, onNext }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt, forced]);
+
+  // Apply the current profile's caption choice to loaded text tracks. Browsers
+  // do not consistently honor a changing <track default> after the first load.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return undefined;
+    const apply = () => {
+      const files = video.textTracks;
+      const want = profile?.subLang;
+      let chosen = false;
+      for (let i = 0; i < files.length; i++) {
+        const track = files[i];
+        const match = want !== 'off' && (localSubtitle ? i === files.length - 1 : (track.language === want && !chosen));
+        track.mode = match ? 'showing' : 'disabled';
+        if (match) chosen = true;
+      }
+    };
+    apply();
+    video.addEventListener('loadedmetadata', apply);
+    return () => video.removeEventListener('loadedmetadata', apply);
+  }, [subtitleFiles, localSubtitle, profile?.subLang, videoSrc]);
+
+  // Subtitles are optional: discovered from sidecar files in this release.
+  useEffect(() => {
+    if (!stream?.hash || !stream?.fileIndex) return undefined;
+    let alive = true;
+    api(`/api/subtitles?hash=${stream.hash}&index=${stream.fileIndex}`)
+      .then(d => { if (alive) setSubtitleFiles(d.subtitles || []); })
+      .catch(() => { if (alive) setSubtitleFiles([]); });
+    return () => { alive = false; };
+  }, [stream?.hash, stream?.fileIndex]);
+
+  useEffect(() => () => { if (subtitleUrl.current) URL.revokeObjectURL(subtitleUrl.current); }, []);
+  const loadCustomSubtitle = (file) => {
+    if (!file || !/\.(vtt|srt)$/i.test(file.name) || file.size > 5 * 1024 * 1024) {
+      notify('Please choose an SRT/VTT file under 5 MB.'); return;
+    }
+    file.text().then(text => {
+      const vtt = /^WEBVTT/.test(text.trimStart()) ? text : `WEBVTT\n\n${text.replace(/(\d{2}:\d{2}:\d{2}),(\d{1,3})/g, '$1.$2')}`;
+      if (subtitleUrl.current) URL.revokeObjectURL(subtitleUrl.current);
+      subtitleUrl.current = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+      setLocalSubtitle({name: file.name, url: subtitleUrl.current});
+      if (profile?.subLang === 'off') setSubLang('en');
+      setSubMenuOpen(false);
+    }).catch(() => notify('Could not read subtitle file.'));
+  };
 
   // The current source connected but cannot be watched (decode error, or no picture ever arrived).
   // Unless the viewer picked it themselves, remember that and move on to the next-best source.
@@ -871,7 +928,7 @@ export default function Player({ spec, onClose, onNext }) {
       <span className="font-bold">{spec.title}</span>
     );
 
-  const iconBtn = 'flex h-11 w-11 items-center justify-center rounded-full text-white transition-transform duration-150 hover:scale-125';
+  const iconBtn = 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white transition-transform duration-150 hover:scale-110 sm:h-11 sm:w-11 [&>svg]:max-h-7 [&>svg]:max-w-7';
   const topBtn = 'flex items-center gap-2 rounded px-3 py-2 text-sm text-white/90 transition-colors hover:bg-white/15';
 
   return (
@@ -901,6 +958,7 @@ export default function Player({ spec, onClose, onNext }) {
               markAttempt(currentLinkRef.current, { status: 'playing', reason: '' });
               setNowPlaying(currentLinkRef.current);
             }
+            if (!playedRef.current) rememberSuccessfulSource(contentKey, attemptsRef.current.find(a => a.link === currentLinkRef.current)?.title);
             playedRef.current = true;
             setPlaying(true);
             setBuffering(false);
@@ -920,7 +978,15 @@ export default function Player({ spec, onClose, onNext }) {
           onCanPlay={() => setBuffering(false)}
           onEnded={onEnded}
           onError={onVideoError}
-        />
+        >
+          {subtitleFiles.map((f) => (
+            <track key={`${stream.hash}:${f.index}`} kind="subtitles"
+              label={`${f.lang.toUpperCase()} · ${f.name}`} srcLang={f.lang === 'und' ? 'en' : f.lang}
+              src={`${BASE}/api/subtitles/file?hash=${stream.hash}&index=${f.index}&videoIndex=${stream.fileIndex}`}
+              default={profile?.subLang !== 'off' && f.lang === profile?.subLang && subtitleFiles.find(x => x.lang === profile.subLang)?.index === f.index} />
+          ))}
+          {localSubtitle && <track key={localSubtitle.url} kind="subtitles" label={localSubtitle.name} srcLang="en" src={localSubtitle.url} default />}
+        </video>
       )}
 
       {/* loading / buffering */}
@@ -929,7 +995,7 @@ export default function Player({ spec, onClose, onNext }) {
           <div className="nf-spinner" />
           {phase === 'resolving' && (
             <>
-              <p className="max-w-[80%] text-center text-lg text-white/80">{message}</p>
+              <p className="max-w-[80%] text-center text-lg text-white/80">{t(message)}</p>
               {attempts.length > 0 && (
                 <ul className="w-[min(92vw,560px)] space-y-1.5" aria-label="Sources being tried">
                   {attempts.slice(-5).map((a) => (
@@ -960,8 +1026,7 @@ export default function Player({ spec, onClose, onNext }) {
           )}
           {phase === 'ready' && stats && (
             <p className="text-sm text-white/60">
-              {fmtSpeed(stats.downloadSpeed)} &middot; {stats.activePeers} peers connected
-            </p>
+              {fmtSpeed(stats.downloadSpeed)} &middot; {stats.activePeers} <Localized text={"peers connected"} /></p>
           )}
         </div>
       )}
@@ -971,13 +1036,12 @@ export default function Player({ spec, onClose, onNext }) {
         <div className="absolute inset-0 flex items-center justify-center bg-black px-6 animate-fadeIn">
           <div className="max-w-[560px] text-center">
             <WarningIcon size={56} className="mx-auto text-nf-red" />
-            <h2 className="mt-4 text-2xl font-bold">We can&apos;t play this right now</h2>
-            <p className="mt-2 text-[#b3b3b3]">{errorText}</p>
+            <h2 className="mt-4 text-2xl font-bold"><Localized text={"We can't play this right now"} /></h2>
+            <p className="mt-2 text-[#b3b3b3]">{t(errorText)}</p>
             <div className="mt-7 flex flex-wrap justify-center gap-3">
               {spec.type !== 'raw' && (
                 <button onClick={() => setPickerOpen(true)} className="btn-white">
-                  Choose another source
-                </button>
+                  <Localized text={"Choose another source"} /></button>
               )}
               {!fixOn && streamRef.current && (
                 <button
@@ -987,15 +1051,12 @@ export default function Player({ spec, onClose, onNext }) {
                   }}
                   className="btn-gray"
                 >
-                  <VolumeIcon size={18} /> Try audio fix
-                </button>
+                  <VolumeIcon size={18} /> <Localized text={"Try audio fix"} /></button>
               )}
               <button onClick={() => setAttempt((n) => n + 1)} className="btn-gray">
-                Try again
-              </button>
+                <Localized text={"Try again"} /></button>
               <button onClick={finish} className="btn-gray">
-                Go back
-              </button>
+                <Localized text={"Go back"} /></button>
             </div>
           </div>
         </div>
@@ -1004,25 +1065,25 @@ export default function Player({ spec, onClose, onNext }) {
       {/* top bar */}
       <div
         className={cx(
-          'absolute inset-x-0 top-0 flex items-center gap-1 bg-gradient-to-b from-black/80 to-transparent px-[3%] pb-10 pt-5 transition-opacity duration-300 sm:gap-2',
+          'absolute inset-x-0 top-0 flex items-center gap-1 bg-gradient-to-b from-black/80 to-transparent px-[3%] pb-10 pt-[max(1rem,env(safe-area-inset-top))] transition-opacity duration-300 sm:gap-2',
           controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
         )}
       >
-        <button onClick={finish} aria-label="Back to browsing" className={iconBtn}>
+        <button onClick={finish} aria-label={t("Back to browsing")} className={iconBtn}>
           <BackIcon size={32} />
         </button>
         <div className="flex-1" />
 
         {fixOn && tracks.length > 1 && (
           <div className="relative">
-            <button onClick={() => setAudioMenu((v) => !v)} aria-label="Choose audio language" className={topBtn}>
+            <button onClick={() => setAudioMenu((v) => !v)} aria-label={t("Choose audio language")} className={topBtn}>
               <VolumeIcon size={18} />
               <span className="max-w-[160px] truncate">{activeTrack ? langName(activeTrack.lang) || `Track ${activeTrack.ord + 1}` : 'Audio'}</span>
               <ChevronDown size={14} />
             </button>
             {audioMenu && (
               <div className="absolute right-0 top-11 z-10 w-72 animate-dropIn overflow-hidden rounded bg-black/95 py-1 shadow-2xl">
-                <p className="px-4 pb-1 pt-2 text-xs font-bold uppercase tracking-wider text-white/50">Audio</p>
+                <p className="px-4 pb-1 pt-2 text-xs font-bold uppercase tracking-wider text-white/50"><Localized text={"Audio"} /></p>
                 {tracks.map((t) => (
                   <button
                     key={t.ord}
@@ -1043,16 +1104,15 @@ export default function Player({ spec, onClose, onNext }) {
             onClick={toggleFix}
             disabled={fixBusy}
             aria-pressed={fixOn}
-            title="Keeps the picture exactly as it is and converts the sound to AAC. Use it when a release plays without sound (AC3, E-AC3, DTS, TrueHD). Your choice is remembered."
+            title={t('Keeps the picture exactly as it is and converts the sound to AAC. Use it when a release plays without sound (AC3, E-AC3, DTS, TrueHD). Your choice is remembered.')}
             className={cx(topBtn, fixOn && '!bg-white font-bold !text-black hover:!bg-white/80', fixBusy && 'opacity-60')}
           >
             <VolumeIcon size={18} />
-            {fixBusy ? 'Preparing\u2026' : fixOn ? 'Audio fix: On' : 'Audio fix'}
+            {t(fixBusy ? 'Preparing…' : fixOn ? 'Audio fix: On' : 'Audio fix')}
           </button>
         )}
         <button onClick={() => setPickerOpen((v) => !v)} aria-pressed={pickerOpen} className={cx(topBtn, pickerOpen && 'bg-white/15')}>
-          <ListIcon size={20} /> Sources
-          {playingAttempt && (
+          <ListIcon size={20} /> <Localized text={"Sources"} />{playingAttempt && (
             <span className="hidden items-center gap-1 rounded bg-white/15 px-1.5 py-px text-[11px] font-bold sm:inline-flex">
               {[playingAttempt.quality, playingAttempt.lang].filter(Boolean).join(' · ')}
             </span>
@@ -1064,8 +1124,7 @@ export default function Player({ spec, onClose, onNext }) {
       {nowAttempt && phase === 'ready' && !pickerOpen && (
         <div className="pointer-events-none absolute left-[3%] top-24 z-10 w-[min(90vw,440px)] animate-slideLeft rounded-md border border-white/15 bg-black/80 p-3 shadow-2xl backdrop-blur">
           <p className="text-[11px] font-bold uppercase tracking-widest text-white/50">
-            Now playing
-            {failedCount > 0 && (
+            <Localized text={"Now playing"} />{failedCount > 0 && (
               <span className="font-normal normal-case tracking-normal text-white/60">
                 {' '}
                 · after {failedCount} source{failedCount > 1 ? 's' : ''} that would not play
@@ -1083,22 +1142,19 @@ export default function Player({ spec, onClose, onNext }) {
             onClick={() => setPickerOpen(true)}
             className="pointer-events-auto mt-2 flex items-center gap-1.5 rounded border border-white/40 px-2.5 py-1 text-xs font-bold transition-colors hover:border-white hover:bg-white/10"
           >
-            <DownloadIcon size={13} /> Details &amp; download
-          </button>
+            <DownloadIcon size={13} /> <Localized text={"Details & download"} /></button>
         </div>
       )}
 
       {/* "no sound?" hint */}
       {noAudioHint && !fixOn && phase === 'ready' && !pickerOpen && (
         <div className="absolute bottom-32 left-1/2 z-10 w-[min(92vw,470px)] -translate-x-1/2 animate-fadeInUp rounded-md border border-white/20 bg-black/90 p-4 shadow-2xl backdrop-blur">
-          <p className="font-bold">No sound?</p>
+          <p className="font-bold"><Localized text={"No sound?"} /></p>
           <p className="mt-1 text-sm text-white/70">
-            This file&apos;s audio format isn&apos;t supported by your browser. The audio fix keeps the picture as it is and converts only the sound.
-          </p>
+            <Localized text={"This file's audio format isn't supported by your browser. The audio fix keeps the picture as it is and converts only the sound."} /></p>
           <div className="mt-3 flex gap-2">
             <button onClick={toggleFix} className="btn-white !px-4 !py-1.5 !text-sm">
-              <VolumeIcon size={16} /> Play with audio fix
-            </button>
+              <VolumeIcon size={16} /> <Localized text={"Play with audio fix"} /></button>
             <button
               onClick={() => {
                 hintDismissedRef.current = true;
@@ -1106,8 +1162,7 @@ export default function Player({ spec, onClose, onNext }) {
               }}
               className="btn-gray !px-4 !py-1.5 !text-sm"
             >
-              Dismiss
-            </button>
+              <Localized text={"Dismiss"} /></button>
           </div>
         </div>
       )}
@@ -1116,7 +1171,7 @@ export default function Player({ spec, onClose, onNext }) {
       {phase === 'ready' && (
         <div
           className={cx(
-            'absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent pb-5 pt-16 transition-opacity duration-300',
+            'absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-16 transition-opacity duration-300',
             controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
           )}
         >
@@ -1150,22 +1205,22 @@ export default function Player({ spec, onClose, onNext }) {
                 </div>
               )}
             </div>
-            <span className="w-[72px] text-right text-lg tabular-nums sm:text-xl">{fmtTime(remaining)}</span>
+            <span className="w-[65px] shrink-0 text-right text-base tabular-nums sm:w-[72px] sm:text-xl">{fmtTime(remaining)}</span>
           </div>
 
-          <div className="mt-1 flex items-center gap-1 px-[3%] sm:gap-2">
-            <button onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} className={iconBtn}>
+          <div className="mt-1 flex items-center justify-between gap-0 px-[2%] sm:gap-2 sm:px-[3%]">
+            <button onClick={toggle} aria-label={t(playing ? 'Pause' : 'Play')} className={iconBtn}>
               {playing ? <PauseIcon size={38} /> : <PlayIcon size={38} />}
             </button>
-            <button onClick={() => seekBy(-10)} aria-label="Back 10 seconds" className={iconBtn}>
+            <button onClick={() => seekBy(-10)} aria-label={t("Back 10 seconds")} className={iconBtn}>
               <Rewind10 size={36} />
             </button>
-            <button onClick={() => seekBy(10)} aria-label="Forward 10 seconds" className={iconBtn}>
+            <button onClick={() => seekBy(10)} aria-label={t("Forward 10 seconds")} className={iconBtn}>
               <Forward10 size={36} />
             </button>
 
-            <div className="group/vol flex items-center">
-              <button onClick={toggleMute} aria-label={muted ? 'Unmute' : 'Mute'} className={iconBtn}>
+            <div className="group/vol hidden items-center sm:flex">
+              <button onClick={toggleMute} aria-label={t(muted ? 'Unmute' : 'Mute')} className={iconBtn}>
                 <VolumeIcon size={34} level={muted || volume === 0 ? 0 : volume < 0.5 ? 1 : 2} />
               </button>
               <input
@@ -1175,22 +1230,41 @@ export default function Player({ spec, onClose, onNext }) {
                 step="0.02"
                 value={muted ? 0 : volume}
                 onChange={(e) => applyVolume(parseFloat(e.target.value))}
-                aria-label="Volume"
+                aria-label={t("Volume")}
                 className="nf-range w-0 opacity-0 transition-all duration-200 group-hover/vol:ml-1 group-hover/vol:w-24 group-hover/vol:opacity-100 focus:ml-1 focus:w-24 focus:opacity-100"
                 style={{ '--val': `${(muted ? 0 : volume) * 100}%` }}
               />
             </div>
 
-            <div className="mx-3 min-w-0 flex-1 truncate text-center text-sm sm:text-lg">{heading}</div>
+            <div className="mx-1 hidden min-w-0 flex-1 truncate text-center text-sm sm:mx-3 sm:block sm:text-lg">{heading}</div>
 
             {nextEp && (
-              <button onClick={goNext} aria-label="Next episode" title={`Next: S${nextEp.season}:E${nextEp.episode}`} className={iconBtn}>
+              <button onClick={goNext} aria-label={t("Next episode")} title={`Next: S${nextEp.season}:E${nextEp.episode}`} className={iconBtn}>
                 <NextIcon size={34} />
               </button>
             )}
 
             <div className="relative">
-              <button onClick={() => setRateMenu((v) => !v)} aria-label="Playback speed" className={iconBtn}>
+              <button onClick={() => setSubMenuOpen(v => !v)} aria-label={t('Subtitles')} className={iconBtn}>
+                <span className="rounded border border-current px-1 text-xs font-bold">CC</span>
+              </button>
+              {subMenuOpen && (
+                <div className="absolute bottom-14 right-0 z-30 max-h-72 w-[min(85vw,260px)] overflow-y-auto rounded border border-white/20 bg-black/95 p-2 text-sm shadow-2xl">
+                  <p className="p-2 font-bold">{t('Subtitles')}</p>
+                  {['off', 'en', 'es'].map(lang => <button key={lang}
+                    onClick={() => { setSubLang(lang); setSubMenuOpen(false); }}
+                    className={`block w-full rounded px-3 py-2 text-left hover:bg-white/15 ${profile?.subLang === lang ? 'bg-white/20' : ''}`}>
+                    {lang === 'off' ? t('Off') : lang === 'en' ? t('English') : t('Español')}
+                  </button>)}
+                  <p className="px-2 pt-2 text-xs text-white/50">{subtitleFiles.length ? `${subtitleFiles.length} ${t('Subtitles')}` : t('No captions available for this source.')}</p>
+                  <button className="mt-1 block w-full rounded px-3 py-2 text-left hover:bg-white/15" onClick={() => subtitleInput.current?.click()}>{t('Load your own SRT/VTT')}</button>
+                  <input ref={subtitleInput} type="file" accept=".srt,.vtt,text/vtt" className="hidden" onChange={e => { loadCustomSubtitle(e.target.files?.[0]); e.target.value=''; }} />
+                </div>
+              )}
+            </div>
+
+            <div className="relative">
+              <button onClick={() => setRateMenu((v) => !v)} aria-label={t("Playback speed")} className={iconBtn}>
                 <SpeedIcon size={34} />
               </button>
               {rateMenu && (
@@ -1212,7 +1286,7 @@ export default function Player({ spec, onClose, onNext }) {
               )}
             </div>
 
-            <button onClick={toggleFs} aria-label={isFs ? 'Exit full screen' : 'Full screen'} className={iconBtn}>
+            <button onClick={toggleFs} aria-label={t(isFs ? 'Exit full screen' : 'Full screen')} className={iconBtn}>
               {isFs ? <ExitFullscreenIcon size={32} /> : <FullscreenIcon size={32} />}
             </button>
           </div>
@@ -1222,15 +1296,14 @@ export default function Player({ spec, onClose, onNext }) {
       {/* next episode card */}
       {showNextCard && nextEp && (
         <div className="absolute bottom-28 right-[3%] z-10 w-[300px] animate-slideLeft rounded-md border border-white/20 bg-black/85 p-4 shadow-2xl backdrop-blur">
-          <p className="text-xs font-bold uppercase tracking-widest text-white/60">Next Episode</p>
+          <p className="text-xs font-bold uppercase tracking-widest text-white/60"><Localized text={"Next Episode"} /></p>
           <p className="mt-1 truncate font-bold">
             S{nextEp.season}:E{nextEp.episode} {nextEp.name ? `\u2013 ${nextEp.name}` : ''}
           </p>
-          {countdown !== null && <p className="mt-1 text-sm text-white/70">Starting in {countdown}&hellip;</p>}
+          {countdown !== null && <p className="mt-1 text-sm text-white/70"><Localized text={"Starting in"} suffix=" " />{countdown}&hellip;</p>}
           <div className="mt-3 flex gap-2">
             <button onClick={goNext} className="btn-white !px-4 !py-1.5 !text-sm">
-              <PlayIcon size={16} /> Play now
-            </button>
+              <PlayIcon size={16} /> <Localized text={"Play now"} /></button>
             <button
               onClick={() => {
                 setCountdown(null);
@@ -1238,8 +1311,7 @@ export default function Player({ spec, onClose, onNext }) {
               }}
               className="btn-gray !px-4 !py-1.5 !text-sm"
             >
-              Cancel
-            </button>
+              <Localized text={"Cancel"} /></button>
           </div>
         </div>
       )}

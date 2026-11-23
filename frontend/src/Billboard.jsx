@@ -1,3 +1,4 @@
+import { Localized } from './locale';
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from './context';
 import { InfoIcon, PlayIcon, VolumeIcon } from './Icons';
@@ -135,11 +136,9 @@ export default function Billboard({ data, suspended = false }) {
 
         <div className="mt-4 flex items-center gap-3">
           <button onClick={() => playTitle(data)} className="btn-white !px-5 sm:!px-8 sm:!py-2.5 sm:!text-xl">
-            <PlayIcon size={26} /> Play
-          </button>
+            <PlayIcon size={26} /> <Localized text={"Play"} /></button>
           <button onClick={() => openTitle(data)} className="btn-gray !px-4 sm:!px-7 sm:!py-2.5 sm:!text-xl">
-            <InfoIcon size={26} /> More Info
-          </button>
+            <InfoIcon size={26} /> <Localized text={"More Info"} /></button>
         </div>
       </div>
 

@@ -97,6 +97,25 @@ try {
   /* column already exists */
 }
 
+// Additive migrations only: existing accounts, passwords and viewing history remain in place.
+for (const ddl of [
+  "ALTER TABLE profiles ADD COLUMN sub_lang TEXT NOT NULL DEFAULT 'off'",
+  "ALTER TABLE profiles ADD COLUMN ui_lang TEXT NOT NULL DEFAULT 'en'",
+  "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0",
+]) {
+  try { db.exec(ddl); } catch (e) {
+    if (!/duplicate column name/i.test(e.message)) throw e;
+  }
+}
+// The earliest existing account is the owner of an installation upgraded from
+// pre-admin versions. No credentials are created or changed by this migration.
+if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1').get()) {
+  const owner = db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get();
+  if (owner) db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(owner.id);
+}
+
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------
@@ -106,7 +125,7 @@ export function getUserByUsername(username) {
 }
 
 export function createUser(username, passwordHash) {
-  return db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(username, passwordHash);
+  return db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)').run(username, passwordHash, db.prepare('SELECT COUNT(*) n FROM users').get().n === 0 ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -115,14 +134,14 @@ export function createUser(username, passwordHash) {
 
 export function listProfiles(userId) {
   return db
-    .prepare('SELECT id, name, avatar, kids, lang FROM profiles WHERE user_id = ? ORDER BY id')
+    .prepare('SELECT id, name, avatar, kids, lang, sub_lang AS subLang, ui_lang AS uiLang FROM profiles WHERE user_id = ? ORDER BY id')
     .all(userId)
     .map((p) => ({ ...p, kids: !!p.kids }));
 }
 
 export function getProfile(userId, profileId) {
   const p = db
-    .prepare('SELECT id, name, avatar, kids, lang FROM profiles WHERE id = ? AND user_id = ?')
+    .prepare('SELECT id, name, avatar, kids, lang, sub_lang AS subLang, ui_lang AS uiLang FROM profiles WHERE id = ? AND user_id = ?')
     .get(profileId, userId);
   return p ? { ...p, kids: !!p.kids } : null;
 }
@@ -150,19 +169,21 @@ export function ensureDefaultProfile(user) {
   return listProfiles(user.id);
 }
 
-export function createProfile(userId, { name, avatar, kids, lang }) {
+export function createProfile(userId, { name, avatar, kids, lang, subLang, uiLang }) {
   const info = db
-    .prepare('INSERT INTO profiles (user_id, name, avatar, kids, lang) VALUES (?, ?, ?, ?, ?)')
-    .run(userId, name, avatar, kids ? 1 : 0, lang === 'es' ? 'es' : 'en');
+    .prepare('INSERT INTO profiles (user_id, name, avatar, kids, lang, sub_lang, ui_lang) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(userId, name, avatar, kids ? 1 : 0, lang === 'es' ? 'es' : 'en', ['en','es'].includes(subLang) ? subLang : 'off', uiLang === 'es' ? 'es' : 'en');
   return getProfile(userId, Number(info.lastInsertRowid));
 }
 
-export function updateProfile(userId, profileId, { name, avatar, kids, lang }) {
-  db.prepare('UPDATE profiles SET name = ?, avatar = ?, kids = ?, lang = ? WHERE id = ? AND user_id = ?').run(
+export function updateProfile(userId, profileId, { name, avatar, kids, lang, subLang, uiLang }) {
+  db.prepare('UPDATE profiles SET name = ?, avatar = ?, kids = ?, lang = ?, sub_lang = ?, ui_lang = ? WHERE id = ? AND user_id = ?').run(
     name,
     avatar,
     kids ? 1 : 0,
     lang === 'es' ? 'es' : 'en',
+    ['en', 'es'].includes(subLang) ? subLang : 'off',
+    uiLang === 'es' ? 'es' : 'en',
     profileId,
     userId
   );

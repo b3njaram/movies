@@ -34,6 +34,8 @@ import {
   getLocalizedTitle,
 } from './tmdb.js';
 import { searchSources, lookupRef, bytesToSize, describeRelease } from './sources.js';
+import { listAccounts, createAccount, updateAccount, adminSummary } from './admin.js';
+import { validatedFileRef, listSubtitleFiles, toVtt } from './subtitles.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
 const PROWLARR_API_KEY = process.env.PROWLARR_API_KEY || '';
@@ -77,14 +79,14 @@ app.post('/api/auth/login', (req, res) => {
   }
 
   const user = getUserByUsername(String(username).trim());
-  if (!user || !verifyPassword(String(password), user.password_hash)) {
+  if (!user || user.disabled || !verifyPassword(String(password), user.password_hash)) {
     attempts.get(ip).push(Date.now());
     return res.status(400).json({ error: 'Incorrect username or password.' });
   }
 
   attempts.delete(ip);
   issueSession(res, user, remember !== false);
-  res.json({ username: user.username });
+  res.json({ username: user.username, isAdmin: Boolean(user.is_admin) });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -95,7 +97,7 @@ app.post('/api/auth/logout', (req, res) => {
 app.get('/api/auth/me', (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: 'Not signed in.', code: 'AUTH' });
-  res.json({ username: user.username });
+  res.json({ username: user.username, isAdmin: Boolean(user.isAdmin) });
 });
 
 // Everything below requires a valid session.
@@ -103,6 +105,35 @@ app.use('/api', requireAuth);
 
 // Used by nginx (auth_request) to protect /stream/* with the same session.
 app.get('/api/auth/check', (req, res) => res.sendStatus(204));
+
+// Browser-facing administration is role checked on every request, not by a
+// flag sent from the browser. A disabled user loses access immediately.
+function requireAdmin(req, res, next) {
+  if (!req.user.isAdmin) return res.status(403).json({ error: 'Administrator access required.' });
+  next();
+}
+
+app.get('/api/admin/overview', requireAdmin, wrap(async (req, res) => {
+  const [prowlarr, torrserver] = await Promise.all([checkProwlarr(), checkTorrServer()]);
+  const recent = [...touched.values()].filter(at => Date.now() - at < 2 * 60 * 1000).length;
+  res.json({ ...adminSummary(), recentTorrents: recent, prowlarr, torrserver });
+}));
+
+app.get('/api/admin/users', requireAdmin, (req, res) => res.json({ users: listAccounts() }));
+
+app.post('/api/admin/users', requireAdmin, wrap(async (req, res) => {
+  const id = createAccount(req.body?.username, req.body?.password);
+  console.info(`[admin] account ${id} created by user ${req.user.id}`);
+  res.status(201).json({ ok: true, id });
+}));
+
+app.patch('/api/admin/users/:id', requireAdmin, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) throw httpError(400, 'Invalid account ID.');
+  updateAccount(req.user.id, id, req.body?.action, req.body?.password);
+  console.info(`[admin] ${req.body?.action} on account ${id} by user ${req.user.id}`);
+  res.json({ ok: true });
+}));
 
 // ---------------------------------------------------------------------------
 // Profiles
@@ -112,7 +143,7 @@ function cleanProfileInput(body) {
   const name = String(body?.name || '').trim().slice(0, 20);
   if (!name) throw httpError(400, 'Please enter a name for the profile.');
   const avatar = Math.min(7, Math.max(0, parseInt(body?.avatar, 10) || 0));
-  return { name, avatar, kids: Boolean(body?.kids), lang: body?.lang === 'es' ? 'es' : 'en' };
+  return { name, avatar, kids: Boolean(body?.kids), lang: body?.lang === 'es' ? 'es' : 'en', subLang: ['en', 'es'].includes(body?.subLang) ? body.subLang : 'off', uiLang: body?.uiLang === 'es' ? 'es' : 'en' };
 }
 
 app.get('/api/profiles', (req, res) => {
@@ -125,8 +156,9 @@ app.post('/api/profiles', (req, res) => {
 
 app.put('/api/profiles/:id', (req, res) => {
   const id = Number(req.params.id);
-  if (!getProfile(req.user.id, id)) throw httpError(404, 'Profile not found.');
-  res.json({ profile: updateProfile(req.user.id, id, cleanProfileInput(req.body)) });
+  const current = getProfile(req.user.id, id);
+  if (!current) throw httpError(404, 'Profile not found.');
+  res.json({ profile: updateProfile(req.user.id, id, cleanProfileInput({ ...current, ...(req.body || {}) })) });
 });
 
 app.delete('/api/profiles/:id', (req, res) => {
@@ -463,6 +495,35 @@ app.get('/api/stats/:hash', wrap(async (req, res) => {
     seeders: s.connected_seeders ?? 0,
     downloadSpeed: s.download_speed ?? 0,
   });
+}));
+
+// Sidecar SRT and VTT subtitles found beside the selected video in TorrServer.
+// No third-party subtitle service or API key is needed. Subtitles never modify
+// the main video stream and no file is stored in SQLite.
+app.get('/api/subtitles', wrap(async (req, res) => {
+  const { hash, index } = validatedFileRef(req.query.hash, req.query.index);
+  const info = await tsPost('/torrents', { action: 'get', hash }, 8000);
+  res.json({ subtitles: listSubtitleFiles(info.file_stats, index) });
+}));
+
+app.get('/api/subtitles/file', wrap(async (req, res) => {
+  const { hash, index } = validatedFileRef(req.query.hash, req.query.index);
+  const videoIndex = Number(req.query.videoIndex);
+  if (!Number.isSafeInteger(videoIndex) || videoIndex < 1) throw httpError(400, 'Invalid video index.');
+  const info = await tsPost('/torrents', { action: 'get', hash }, 8000);
+  const allowed = listSubtitleFiles(info.file_stats, videoIndex).find(f => f.index === index);
+  if (!allowed) throw httpError(404, 'Subtitle file not available for this video.');
+  // TorrServer's stream endpoint uses the torrent hash and file index; neither
+  // the host nor the URL can be supplied by the user.
+  const url = `${TORRSERVER_URL}/stream/${encodeURIComponent(allowed.name)}?link=${hash}&index=${index}&play`;
+  const upstream = await fetch(url, { signal: AbortSignal.timeout(12000) });
+  if (!upstream.ok) throw httpError(502, `Subtitle could not be loaded (${upstream.status}).`);
+  const len = Number(upstream.headers.get('content-length') || 0);
+  if (len > 5 * 1024 * 1024) throw httpError(413, 'Subtitle file too large.');
+  const bytes = new Uint8Array(await upstream.arrayBuffer());
+  if (bytes.byteLength > 5 * 1024 * 1024) throw httpError(413, 'Subtitle file too large.');
+  res.set({ 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.send(toVtt(new TextDecoder('utf-8').decode(bytes)));
 }));
 
 // ---------------------------------------------------------------------------

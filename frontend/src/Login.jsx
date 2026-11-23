@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { api } from './api';
 import Logo from './Logo';
+import { useLocale } from './locale';
 
 function Field({ id, label, type = 'text', value, onChange, autoFocus, autoComplete }) {
   return (
@@ -26,6 +27,7 @@ function Field({ id, label, type = 'text', value, onChange, autoFocus, autoCompl
 }
 
 export default function Login({ onLogin }) {
+  const { t, lang, setLang } = useLocale();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
@@ -39,7 +41,7 @@ export default function Login({ onLogin }) {
     setError('');
     try {
       const data = await api('/api/auth/login', { method: 'POST', body: { username, password, remember } });
-      onLogin(data.username);
+      onLogin(data.username, data.isAdmin);
     } catch (err) {
       setError(err.message);
       setLoading(false);
@@ -63,6 +65,7 @@ export default function Login({ onLogin }) {
 
       <header className="relative z-10 px-6 py-6 sm:px-14">
         <Logo size="text-4xl sm:text-5xl" className="animate-logoIn" />
+        <button className="float-right rounded border border-white/30 px-3 py-2 text-sm text-white" onClick={()=>setLang(lang==='es'?'en':'es')}>{lang==='es'?'English':'Español'}</button>
       </header>
 
       <main className="relative z-10 flex justify-center px-4 pb-16 sm:pt-2">
@@ -70,17 +73,17 @@ export default function Login({ onLogin }) {
           onSubmit={submit}
           className="w-full max-w-[450px] animate-fadeInUp rounded-md px-4 pb-10 pt-6 sm:bg-black/75 sm:px-[68px] sm:pb-14 sm:pt-12"
         >
-          <h1 className="mb-7 text-[32px] font-bold leading-none">Sign In</h1>
+          <h1 className="mb-7 text-[32px] font-bold leading-none">{t("Sign In")}</h1>
 
           {error && (
             <div role="alert" className="mb-4 rounded bg-[#e87c03] px-5 py-4 text-sm leading-snug text-white animate-dropIn">
-              {error}
+              {t(error)}
             </div>
           )}
 
           <div className="flex flex-col gap-4">
-            <Field id="username" label="Username" value={username} onChange={setUsername} autoFocus autoComplete="username" />
-            <Field id="password" label="Password" type="password" value={password} onChange={setPassword} autoComplete="current-password" />
+            <Field id="username" label={t("Username")} value={username} onChange={setUsername} autoFocus autoComplete="username" />
+            <Field id="password" label={t("Password")} type="password" value={password} onChange={setPassword} autoComplete="current-password" />
           </div>
 
           <button
@@ -88,7 +91,7 @@ export default function Login({ onLogin }) {
             disabled={loading || !username || !password}
             className="mt-6 flex h-12 w-full items-center justify-center rounded bg-nf-red text-base font-bold transition-colors hover:bg-nf-redDark disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {loading ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : 'Sign In'}
+            {loading ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : t('Sign In')}
           </button>
 
           <label className="mt-4 flex cursor-pointer select-none items-center gap-2 text-[13px] text-[#b3b3b3]">
@@ -98,11 +101,11 @@ export default function Login({ onLogin }) {
               onChange={(e) => setRemember(e.target.checked)}
               className="h-4 w-4 accent-[#b3b3b3]"
             />
-            Remember me
+            {t("Remember me")}
           </label>
 
           <p className="mt-14 text-[13px] leading-snug text-[#8c8c8c]">
-            Accounts are created by the server administrator. Ask them if you need access.
+            {lang==='es' ? 'Las cuentas las crea el administrador del servidor. Pide acceso si lo necesitas.' : 'Accounts are created by the server administrator. Ask them if you need access.'}
           </p>
         </form>
       </main>

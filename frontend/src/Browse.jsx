@@ -1,3 +1,4 @@
+import { Localized, useLocale } from './locale';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from './api';
 import { useApp } from './context';
@@ -31,26 +32,23 @@ export function historySpec(h) {
 function SetupCard() {
   return (
     <div className="mx-auto mt-32 max-w-[640px] animate-fadeInUp rounded-lg bg-[#1f1f1f] p-8 shadow-2xl">
-      <h2 className="text-2xl font-bold">Set up your catalog</h2>
+      <h2 className="text-2xl font-bold"><Localized text={"Set up your catalog"} /></h2>
       <p className="mt-2 text-[#b3b3b3]">
-        To fill this page with posters, trailers and descriptions, StreamHub uses The Movie Database (TMDB). It&apos;s free and takes about a minute.
-      </p>
+        <Localized text={"To fill this page with posters, trailers and descriptions, StreamHub uses The Movie Database (TMDB). It's free and takes about a minute."} /></p>
       <ol className="mt-5 list-decimal space-y-2 pl-5 text-[15px] leading-relaxed text-[#e5e5e5]">
         <li>
-          Create a free account at <span className="font-bold">themoviedb.org</span>.
+          <Localized text={"Create a free account at"} suffix=" " /><span className="font-bold">themoviedb.org</span>.
         </li>
         <li>
-          Open <span className="font-bold">Settings → API</span> and copy your <span className="font-bold">API Key</span>.
+          <Localized text={"Open"} suffix=" " /><span className="font-bold">Settings → API</span> <Localized text={"and copy your"} suffix=" " /><span className="font-bold">API Key</span>.
         </li>
         <li>
-          Add this line to the <code className="rounded bg-black/50 px-1.5 py-0.5">.env</code> file next to your docker-compose.yml:
-          <pre className="mt-2 overflow-x-auto rounded bg-black/60 p-3 text-sm text-[#46d369]">TMDB_API_KEY=your_key_here</pre>
+          <Localized text={"Add this line to the"} suffix=" " /><code className="rounded bg-black/50 px-1.5 py-0.5">.env</code> <Localized text={"file next to your docker-compose.yml:"} /><pre className="mt-2 overflow-x-auto rounded bg-black/60 p-3 text-sm text-[#46d369]">TMDB_API_KEY=your_key_here</pre>
         </li>
         <li>
-          Run <code className="rounded bg-black/50 px-1.5 py-0.5">docker compose up -d</code> and refresh this page.
-        </li>
+          <Localized text={"Run"} suffix=" " /><code className="rounded bg-black/50 px-1.5 py-0.5">docker compose up -d</code> <Localized text={"and refresh this page."} /></li>
       </ol>
-      <p className="mt-5 text-sm text-[#808080]">Until then, you can still use the search box to find releases directly from your indexers.</p>
+      <p className="mt-5 text-sm text-[#808080]"><Localized text={"Until then, you can still use the search box to find releases directly from your indexers."} /></p>
     </div>
   );
 }
@@ -59,9 +57,9 @@ export function ListPage() {
   const { myList, openTitle, playTitle } = useApp();
   return (
     <div className="px-[4%] pb-24 pt-28 animate-fadeIn">
-      <h1 className="mb-8 text-3xl font-bold">My List</h1>
+      <h1 className="mb-8 text-3xl font-bold"><Localized text={"My List"} /></h1>
       {myList.length === 0 ? (
-        <p className="text-lg text-[#b3b3b3]">You haven&apos;t added any titles to your list yet. Use the + button on any title.</p>
+        <p className="text-lg text-[#b3b3b3]"><Localized text={"You haven't added any titles to your list yet. Use the + button on any title."} /></p>
       ) : (
         <div className="grid grid-cols-3 gap-x-2 gap-y-10 sm:grid-cols-4 lg:grid-cols-6">
           {myList.map((item) => (
@@ -74,6 +72,7 @@ export function ListPage() {
 }
 
 export default function Browse({ page, historyVersion, suspended }) {
+  const { t } = useLocale();
   const { profile, myList, play, openTitle, playTitle } = useApp();
   const [state, setState] = useState({ loading: true });
   const [history, setHistory] = useState([]);
@@ -119,10 +118,9 @@ export default function Browse({ page, historyVersion, suspended }) {
   if (state.error) {
     return (
       <div className="px-[4%] pt-40 text-center animate-fadeIn">
-        <p className="text-xl">{state.error}</p>
+        <p className="text-xl">{t(state.error)}</p>
         <button onClick={() => setReload((n) => n + 1)} className="btn-white mt-6">
-          Try again
-        </button>
+          <Localized text={"Try again"} /></button>
       </div>
     );
   }
@@ -135,7 +133,7 @@ export default function Browse({ page, historyVersion, suspended }) {
         {showHistory && <HistoryRow history={history} play={play} openTitle={openTitle} />}
 
         {page === 'home' && myList.length > 0 && (
-          <Row title="My List" count={myList.length}>
+          <Row title={t("My List")} count={myList.length}>
             {myList.map((item) => (
               <Card key={`${item.type}-${item.id}`} item={item} onOpen={() => openTitle(item)} onPlay={() => playTitle(item)} />
             ))}
@@ -163,8 +161,9 @@ export default function Browse({ page, historyVersion, suspended }) {
 }
 
 function HistoryRow({ history, play, openTitle }) {
+  const { t } = useLocale();
   return (
-    <Row title="Continue Watching" count={history.length}>
+    <Row title={t("Continue Watching")} count={history.length}>
       {history.map((h) => {
         const item = historyItem(h);
         const subtitle = h.type === 'tv' ? `S${h.season}:E${h.episode}${h.subtitle ? ` \u2022 ${h.subtitle}` : ''}` : null;
@@ -174,7 +173,7 @@ function HistoryRow({ history, play, openTitle }) {
             item={item}
             variant="wide"
             subtitle={subtitle}
-            badge={h.nextUp ? 'Up next' : null}
+            badge={h.nextUp ? t('Up next') : null}
             progress={h.durationSeconds ? h.positionSeconds / h.durationSeconds : 0}
             onPlay={() => play(historySpec(h))}
             onOpen={h.tmdbId ? () => openTitle(item) : () => play(historySpec(h))}

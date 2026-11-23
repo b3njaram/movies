@@ -1,0 +1,32 @@
+name: StreamHub checks
+on:
+  push:
+    branches: [main, 'phase1-*']
+  pull_request:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compatibility and subtitle tests
+        run: node --test backend/test/*.test.js frontend/test/*.test.js
+      - name: Database migration compatibility
+        run: python3 tests/migration.test.py
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm install --no-audit --no-fund
+      - name: Validate backend JavaScript
+        run: |
+          node --check backend/server.js
+          node --check backend/db.js
+          node --check backend/admin.js
+          node --check backend/auth.js
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm install --no-audit --no-fund
+          npm run build

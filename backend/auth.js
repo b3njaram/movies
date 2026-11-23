@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import { db } from './db.js';
 
 const COOKIE_NAME = 'sh_session';
 
@@ -24,7 +25,7 @@ export function verifyPassword(plain, hash) {
 // remember=true  -> 30 day persistent cookie
 // remember=false -> browser-session cookie, token valid for 12h
 export function issueSession(res, user, remember = true) {
-  const token = jwt.sign({ sub: user.id, username: user.username }, SECRET, {
+  const token = jwt.sign({ sub: user.id, username: user.username, v: user.session_version || 0 }, SECRET, {
     expiresIn: remember ? '30d' : '12h',
   });
   const options = { httpOnly: true, sameSite: 'lax', path: '/' };
@@ -41,7 +42,9 @@ export function getSessionUser(req) {
   if (!token) return null;
   try {
     const payload = jwt.verify(token, SECRET);
-    return { id: payload.sub, username: payload.username };
+    const user = db.prepare('SELECT id, username, is_admin AS isAdmin, disabled, session_version AS sessionVersion FROM users WHERE id = ?').get(payload.sub);
+    if (!user || user.disabled || (payload.v || 0) !== user.sessionVersion) return null;
+    return { id: user.id, username: user.username, isAdmin: Boolean(user.isAdmin) };
   } catch {
     return null;
   }

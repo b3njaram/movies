@@ -1,3 +1,4 @@
+import { Localized, useLocale } from './locale';
 import React, { useEffect, useState } from 'react';
 import { api } from './api';
 import { useApp } from './context';
@@ -5,6 +6,7 @@ import Card from './Card';
 import { SourceRow, SkippedNote } from './SourcePicker';
 
 export default function SearchView({ query }) {
+  const { t } = useLocale();
   const { profile, openTitle, playTitle, play, download } = useApp();
   const [catalog, setCatalog] = useState({ loading: true, results: [], configured: true });
   const [raw, setRaw] = useState(null); // null = not requested yet
@@ -49,11 +51,11 @@ export default function SearchView({ query }) {
               ))}
             </div>
           ) : catalog.error ? (
-            <p className="text-lg text-[#e87c03]">{catalog.error}</p>
+            <p className="text-lg text-[#e87c03]">{t(catalog.error)}</p>
           ) : catalog.results.length > 0 ? (
             <>
               <h2 className="mb-6 text-lg text-[#e5e5e5]">
-                Titles related to <span className="font-bold text-white">&ldquo;{query}&rdquo;</span>
+                <Localized text={"Titles related to"} suffix=" " /><span className="font-bold text-white">&ldquo;{query}&rdquo;</span>
               </h2>
               <div className="grid grid-cols-3 gap-x-2 gap-y-10 sm:grid-cols-4 lg:grid-cols-6">
                 {catalog.results.map((item) => (
@@ -64,9 +66,8 @@ export default function SearchView({ query }) {
           ) : (
             <div className="mt-16 text-center text-[#b3b3b3]">
               <p className="text-lg">
-                Your search for <span className="font-bold text-white">&ldquo;{query}&rdquo;</span> did not have any matches.
-              </p>
-              <p className="mt-2 text-sm">Suggestions: try different keywords, or a movie or TV show title.</p>
+                <Localized text={"Your search for"} suffix=" " /><span className="font-bold text-white">&ldquo;{query}&rdquo;</span> <Localized text={"did not have any matches."} /></p>
+              <p className="mt-2 text-sm"><Localized text={"Suggestions: try different keywords, or a movie or TV show title."} /></p>
             </div>
           )}
         </>
@@ -77,22 +78,21 @@ export default function SearchView({ query }) {
           {raw === null ? (
             catalog.configured && (
               <button onClick={searchRaw} className="text-sm text-[#b3b3b3] underline-offset-4 transition-colors hover:text-white hover:underline">
-                Can&apos;t find it? Search your indexers directly for &ldquo;{query}&rdquo;
+                <Localized text={"Can't find it? Search your indexers directly for “"} />{query}&rdquo;
               </button>
             )
           ) : (
             <>
-              <h2 className="mb-3 text-xl font-bold">From your indexers</h2>
+              <h2 className="mb-3 text-xl font-bold"><Localized text={"From your indexers"} /></h2>
               <div className="rounded-md bg-[#1f1f1f] p-2">
                 {raw.loading && (
                   <div className="flex items-center gap-3 px-3 py-6 text-sm text-[#b3b3b3]">
                     <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-nf-red" />
-                    Searching your indexers…
-                  </div>
+                    <Localized text={"Searching your indexers…"} /></div>
                 )}
-                {raw.error && <p className="px-3 py-4 text-sm text-[#e87c03]">{raw.error}</p>}
+                {raw.error && <p className="px-3 py-4 text-sm text-[#e87c03]">{t(raw.error)}</p>}
                 {!raw.loading && !raw.error && raw.results.length === 0 && (
-                  <p className="px-3 py-4 text-sm text-[#b3b3b3]">Nothing found on your indexers.</p>
+                  <p className="px-3 py-4 text-sm text-[#b3b3b3]"><Localized text={"Nothing found on your indexers."} /></p>
                 )}
                 <div className="thin-scroll max-h-[520px] overflow-y-auto">
                   {raw.results.map((s) => (
