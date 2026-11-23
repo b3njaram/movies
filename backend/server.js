@@ -701,6 +701,7 @@ app.post('/api/stream', withProfile, wrap(async (req, res) => {
   const file = pickFile(info.file_stats, season ?? null, episode ?? null);
   if (!file) throw httpError(404, 'No playable video file was found in this torrent.');
   // Grant access only after finding a playable file for this approved title.
+  recordEvent('playback_started',req.profile.id);
   if (req.profile.maxAge < 18) grantHash(req.user.id,req.profile.id,hash);
 
   const baseName = (file.path.split('/').pop() || 'video').trim() || 'video';

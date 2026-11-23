@@ -13,6 +13,7 @@ const BACKUP_ROOT = path.join(ROOT, 'backups');
 const BASE = String(process.env.TORRSERVER_URL || 'http://torrserver:8090').replace(/\/$/,'');
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const GB = 1024 ** 3;
+const otherLibraryBytes = id => Math.max(0, libraryBytes() - (getDownload(id)?.downloaded_bytes || 0));
 const activeControllers = new Map();
 let busy = false;
 let started = false;
@@ -41,6 +42,26 @@ export function wakeDownloads() {setImmediate(pump);}
 export function cancelCurrent(id) {activeControllers.get(Number(id))?.abort();}
 function wait(ms) {return new Promise(r=>setTimeout(r,ms));}
 
+async function restoreTorrent(hash,signal) {
+  // TorrServer may forget non-persistent torrent registrations after restart.
+  // A hash-only magnet can restore metadata without storing an external URL.
+  const get=()=>fetch(`${BASE}/torrents`,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'get',hash}),signal:AbortSignal.any([signal,AbortSignal.timeout(8000)])})
+    .then(r=>r.ok?r.json():null).catch(()=>null);
+  const found=await get();
+  if(found?.file_stats?.length)return;
+  const added=await fetch(`${BASE}/torrents`,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'add',link:`magnet:?xt=urn:btih:${hash}`,save_to_db:false}),
+    signal:AbortSignal.any([signal,AbortSignal.timeout(40000)])});
+  if(!added.ok)throw new Error(`TorrServer could not restore this source (HTTP ${added.status}).`);
+  for(let i=0;i<20;i++){
+    if(signal.aborted)throw new Error('Download paused.');
+    const info=await get();
+    if(info?.file_stats?.length)return;
+    await wait(1000);
+  }
+  throw new Error('TorrServer has not found the file list yet. Resume when peers are available.');
+}
 async function pump() {
   if(busy)return;
   const job=nextQueuedDownload();
@@ -60,7 +81,7 @@ async function downloadOne(job) {
   fs.mkdirSync(LIBRARY_ROOT,{recursive:true});
   const part=partialPath(job.id);
   let offset=fs.existsSync(part)?fs.statSync(part).size:0;
-  if((libraryBytes()+Math.max(0,job.total_bytes-offset))>limit) throw new Error('Library quota reached. Free space or raise the quota in Admin.');
+  if(otherLibraryBytes(job.id)+Math.max(offset,job.total_bytes)>limit) throw new Error('Library quota reached. Free space or raise the quota in Admin.');
   const controller=new AbortController();activeControllers.set(job.id,controller);
   updateDownload(job.id,{status:'running',downloaded_bytes:offset,error:null});
   touchTorrent(job.hash);
@@ -69,6 +90,7 @@ async function downloadOne(job) {
   const headers=offset?{Range:`bytes=${offset}-`}:{};
   let stream;
   try {
+    await restoreTorrent(job.hash,controller.signal);
     const response=await fetch(url,{headers,signal:controller.signal});
     if(![200,206].includes(response.status)||!response.body)throw new Error(`Source returned HTTP ${response.status}`);
     if(offset && response.status!==206){
@@ -78,7 +100,7 @@ async function downloadOne(job) {
     const total=Number(response.headers.get('content-length'))||0;
     const expected=job.total_bytes||(total?(response.status===206?offset+total:total):0);
     if(expected && expected>limit)throw new Error('This file exceeds your library quota.');
-    if(expected && libraryBytes()-job.downloaded_bytes+expected>limit)throw new Error('Insufficient library quota for this download.');
+    if(expected && otherLibraryBytes(job.id)+expected>limit)throw new Error('Insufficient library quota for this download.');
     updateDownload(job.id,{total_bytes:expected,downloaded_bytes:offset});
     stream=fs.createWriteStream(part,{flags:offset?'a':'w'});
     let bytes=offset,checkpoint=Date.now(),start=Date.now(),received=0;
@@ -86,9 +108,9 @@ async function downloadOne(job) {
     for await(const chunk of response.body){
       if(controller.signal.aborted)throw new Error('Download paused.');
       bytes+=chunk.length;received+=chunk.length;touchTorrent(job.hash);
-      if(bytes>limit || libraryBytes()-job.downloaded_bytes+bytes>limit)throw new Error('Library quota reached.');
+      if(otherLibraryBytes(job.id)+bytes>limit)throw new Error('Library quota reached.');
       if(!stream.write(chunk))await once(stream,'drain');
-      if(bps){const shouldWait=(received/bps)*1000-(Date.now()-start);if(shouldWait>0)await wait(Math.min(shouldWait,3000));}
+      if(bps){let shouldWait=(received/bps)*1000-(Date.now()-start);while(shouldWait>0&&!controller.signal.aborted){await wait(Math.min(shouldWait,1500));shouldWait=(received/bps)*1000-(Date.now()-start);}}
       if(Date.now()-checkpoint>900){updateDownload(job.id,{downloaded_bytes:bytes});checkpoint=Date.now();}
     }
     stream.end();await once(stream,'finish');
