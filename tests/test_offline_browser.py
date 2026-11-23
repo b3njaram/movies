@@ -70,17 +70,16 @@ def main():
                 page = context.new_page()
                 origin = f'http://127.0.0.1:{server.server_port}'
                 page.goto(origin)
-                page.evaluate('''async () => {
-                    await navigator.serviceWorker.ready;
-                    if (!navigator.serviceWorker.controller) await new Promise(resolve =>
-                        navigator.serviceWorker.addEventListener('controllerchange', resolve, {once: true}));
-                }''')
+                # Bound the wait so an activation failure cannot hang CI indefinitely.
+                page.wait_for_function("navigator.serviceWorker.controller !== null", timeout=15000)
+                print('E2E: service worker activated', flush=True)
                 item = page.evaluate('''async () => {
                     const mod = await import('/offline-store.js');
                     return mod.downloadOfflineVideo({src:'/api/local-media/stream/1',title:'End to end movie',
                         profileName:'Test profile',profileId:1});
                 }''')
                 assert item['bytes'] == len(source), item
+                print('E2E: sample video downloaded', flush=True)
                 assert len(item['id']) == 36
                 rejected = page.evaluate('''async () => {
                     const mod = await import('/offline-store.js');
@@ -90,9 +89,11 @@ def main():
                 assert rejected, 'Unauthorized responses must not become offline files.'
                 page.goto(origin + '/offline.html')
                 expect(page.get_by_text('End to end movie')).to_be_visible(timeout=10000)
+                print('E2E: online saved library loaded', flush=True)
                 context.set_offline(True)
                 page.goto(origin + '/offline.html')
                 expect(page.get_by_text('End to end movie')).to_be_visible(timeout=10000)
+                print('E2E: offline navigation succeeded', flush=True)
                 page.get_by_role('button', name='Play offline').click()
                 page.wait_for_function("document.querySelector('video').readyState >= 1", timeout=15000)
                 assert page.locator('video').evaluate('el => el.currentSrc.startsWith("blob:")')
