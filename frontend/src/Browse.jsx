@@ -1,10 +1,11 @@
 import { Localized, useLocale } from './locale';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from './api';
 import { useApp } from './context';
 import Billboard from './Billboard';
 import Card from './Card';
 import Row, { RowSkeleton } from './Row';
+import {excludeCompletedMovies,uniqueTitles} from './home-personalization';
 
 function historyItem(h) {
   return { id: h.tmdbId, type: h.type, title: h.title, year: h.year, poster: h.poster, backdrop: h.backdrop };
@@ -62,7 +63,7 @@ export function ListPage() {
         <p className="text-lg text-[#b3b3b3]"><Localized text={"You haven't added any titles to your list yet. Use the + button on any title."} /></p>
       ) : (
         <div className="grid grid-cols-3 gap-x-2 gap-y-10 sm:grid-cols-4 lg:grid-cols-6">
-          {myList.map((item) => (
+          {saved.map((item) => (
             <Card key={`${item.type}-${item.id}`} item={item} fluid onOpen={() => openTitle(item)} onPlay={() => playTitle(item)} />
           ))}
         </div>
@@ -73,10 +74,11 @@ export function ListPage() {
 
 export default function Browse({ page, historyVersion, suspended }) {
   const { t } = useLocale();
-  const { profile, myList, play, openTitle, playTitle } = useApp();
+  const { profile, myList, play, openTitle, playTitle, notify } = useApp();
   const [state, setState] = useState({ loading: true });
   const [history, setHistory] = useState([]);
   const [recommended,setRecommended]=useState([]);
+  const [home,setHome]=useState({settings:{hideWatched:false},completedMovieIds:[],watchAgain:[]});
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
@@ -107,6 +109,23 @@ export default function Browse({ page, historyVersion, suspended }) {
     return()=>{alive=false;};
   },[page,profile.id,historyVersion]);
 
+  useEffect(()=>{
+    if(page!=='home')return undefined;
+    let alive=true;
+    api('/api/home/preferences').then(d=>{if(alive)setHome(d);}).catch(()=>{});
+    return ()=>{alive=false;};
+  },[page,profile.id,historyVersion]);
+  const hidden=Boolean(home.settings?.hideWatched);
+  const completed=home.completedMovieIds||[];
+  const picks=useMemo(()=>uniqueTitles(excludeCompletedMovies(recommended,completed,hidden)),[recommended,completed,hidden]);
+  const saved=useMemo(()=>excludeCompletedMovies(myList,completed,hidden),[myList,completed,hidden]);
+  const toggleWatched=async()=>{
+    const previous=home;
+    const next=!hidden;
+    setHome({...home,settings:{hideWatched:next}});
+    try {await api('/api/home/preferences',{method:'PUT',body:{hideWatched:next}});}
+    catch(e){setHome(previous);notify(e.message);}
+  };
   const data = state.data;
   const showHistory = page === 'home' && history.length > 0;
 
@@ -139,18 +158,27 @@ export default function Browse({ page, historyVersion, suspended }) {
 
       <div className="relative z-10 -mt-[11vw] sm:-mt-[9vw]">
         {showHistory && <HistoryRow history={history} play={play} openTitle={openTitle} />}
+        {page==='home'&&<div className="flex justify-end px-[4%] pb-3">
+          <button type="button" onClick={toggleWatched} aria-pressed={hidden} className="rounded border border-white/30 bg-black/55 px-3 py-2 text-xs text-white/85 hover:bg-white/15">
+            {hidden?t('Show watched movies'):t('Hide watched movies')}
+          </button>
+        </div>}
 
-        {page==='home'&&recommended.length>0&&<Row title={t('Recommended for you')} count={recommended.length}>
-          {recommended.map(item=><Card key={`${item.type}-${item.id}`} item={item} onOpen={()=>openTitle(item)} onPlay={()=>playTitle(item)}/>)}
+        {page==='home'&&picks.length>0&&<Row title={t('Recommended for you')} count={picks.length}>
+          {picks.map(item=><Card key={`${item.type}-${item.id}`} item={item} onOpen={()=>openTitle(item)} onPlay={()=>playTitle(item)}/>)}
         </Row>}
 
-        {page === 'home' && myList.length > 0 && (
-          <Row title={t("My List")} count={myList.length}>
-            {myList.map((item) => (
+        {page === 'home' && saved.length > 0 && (
+          <Row title={t("My List")} count={saved.length}>
+            {saved.map((item) => (
               <Card key={`${item.type}-${item.id}`} item={item} onOpen={() => openTitle(item)} onPlay={() => playTitle(item)} />
             ))}
           </Row>
         )}
+
+        {page==='home'&&home.watchAgain?.length>0&&<Row title={t('Watch again')} count={home.watchAgain.length}>
+          {home.watchAgain.map(item=><Card key={`${item.type}-${item.id}`} item={item} onOpen={()=>openTitle(item)} onPlay={()=>playTitle(item)}/>)}
+        </Row>}
 
         {state.loading ? (
           <>
@@ -159,13 +187,14 @@ export default function Browse({ page, historyVersion, suspended }) {
             <RowSkeleton />
           </>
         ) : (
-          data.rows.map((row) => (
-            <Row key={row.id} title={row.title} count={row.items.length}>
-              {row.items.map((item) => (
+          data.rows.map((row) => {
+            const items=page==='home'?excludeCompletedMovies(row.items,completed,hidden):row.items;
+            return items.length>0?<Row key={row.id} title={row.title} count={items.length}>
+              {items.map((item) => (
                 <Card key={`${item.type}-${item.id}`} item={item} onOpen={() => openTitle(item)} onPlay={() => playTitle(item)} />
               ))}
-            </Row>
-          ))
+            </Row>:null;
+          })
         )}
       </div>
     </div>

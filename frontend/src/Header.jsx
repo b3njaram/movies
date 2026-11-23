@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Logo from './Logo';
 import Avatar from './Avatar';
+import NotificationBell from './NotificationBell';
 import { ChevronDown, CloseIcon, PencilIcon, SearchIcon } from './Icons';
 import { cx } from './utils';
 import { useLocale } from './locale';
@@ -155,6 +156,7 @@ export default function Header({ page, onNav, query, onQuery, profile, isAdmin =
             </div>
           )}
 
+          <NotificationBell key={profile.id} onNavigate={onNav} />
           <button className="shrink-0 rounded border border-white/30 px-2 py-1 text-xs font-bold text-white/85 hover:bg-white/10"
             aria-label={t('Change language')} title={t('Change language')}
             onClick={() => setUiLang(profile.uiLang === 'es' ? 'en' : 'es')}>
