@@ -14,9 +14,11 @@ import SearchView from './SearchView';
 import TitleModal from './TitleModal';
 import Player from './Player';
 import Admin from './Admin';
+import {LibraryPage,PlaybackSettings} from './Advanced';
 import InstallPrompt from './InstallPrompt';
 import { useLocale } from './locale';
 import { CloseIcon } from './Icons';
+import {setQualityPref} from './compat';
 
 function Splash() {
   return (
@@ -196,6 +198,7 @@ export default function App() {
     api('/api/mylist')
       .then((d) => setMyList(d.items))
       .catch(() => {});
+    api('/api/playback/settings').then(d=>setQualityPref(d.settings.quality)).catch(()=>{});
     api('/api/status')
       .then(setStatus)
       .catch(() => {});
@@ -335,6 +338,17 @@ export default function App() {
     [notify]
   );
 
+  // Server-side storage is opt-in; browser downloads remain available.
+  const saveToLibrary = useCallback(async (source, spec = {}) => {
+    try {
+      const data = await api('/api/stream', {method:'POST',body:{link:source.link,season:spec.season,episode:spec.episode,contentKey:spec.contentKey}});
+      const key = spec.contentKey || (spec.type==='tv' ? `tv:${spec.tmdbId}:s${spec.season}e${spec.episode}` : spec.type==='movie' ? `movie:${spec.tmdbId}` : data.contentKey);
+      await api('/api/downloads/queue',{method:'POST',body:{hash:data.hash,index:data.fileIndex,contentKey:key,
+        title:spec.title||data.fileName,mediaType:spec.type||'raw',tmdbId:spec.tmdbId||null,season:spec.season,episode:spec.episode}});
+      notify('Added to the server download queue.');
+    } catch(e){notify(e.message);}
+  },[notify]);
+
   // ------------------------------------------------------------------
   // My List
   // ------------------------------------------------------------------
@@ -383,8 +397,8 @@ export default function App() {
   const pinDialog=pinTarget && <ProfilePinDialog key={pinTarget.id} target={pinTarget} onUnlock={selectProfile} onCancel={cancelPin}/>;
 
   const ctx = useMemo(
-    () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang, setSubLang, setUiLang }),
-    [profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang, setSubLang, setUiLang]
+    () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, saveToLibrary, setLang, setSubLang, setUiLang }),
+    [profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, saveToLibrary, setLang, setSubLang, setUiLang]
   );
 
   const nav = (id) => {
@@ -462,6 +476,10 @@ export default function App() {
             <Admin />
           ) : searching ? (
             <SearchView query={query.trim()} />
+          ) : page === 'library' ? (
+            <LibraryPage />
+          ) : page === 'playback' ? (
+            <PlaybackSettings />
           ) : page === 'discover' ? (
             <Discover />
           ) : page === 'list' ? (

@@ -24,6 +24,7 @@ import { contentKeyOf, cx, fmtSpeed, fmtTime } from './utils';
 import { getRankedSources, rememberSuccessfulSource } from './compat';
 import { useLocale } from './locale';
 import { nearestInDirection } from './tv-spatial';
+import {localDeviceId,localDeviceName} from './device';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -96,6 +97,7 @@ export default function Player({ spec, onClose, onNext }) {
   const fixExplicitRef = useRef(Boolean(spec.audioFix));
   const hintDismissedRef = useRef(false);
   const fixOnRef = useRef(false);
+  const convertRef = useRef(false);
   const baseRef = useRef(0);
   const durRef = useRef(0);
   const failedRef = useRef(new Set()); // source links that connected but would not play
@@ -142,6 +144,10 @@ export default function Player({ spec, onClose, onNext }) {
 
   // audio fix
   const [fixOn, setFixOn] = useState(false);
+  const [convertOn,setConvertOn]=useState(false);
+  const [convertOffset,setConvertOffset]=useState(0);
+  const [convertHeight,setConvertHeight]=useState(720);
+  const [saveBusy,setSaveBusy]=useState(false);
   const [fixOffset, setFixOffset] = useState(0);
   const [fixTrack, setFixTrack] = useState(0);
   const [fixInfo, setFixInfo] = useState(null);
@@ -177,11 +183,14 @@ export default function Player({ spec, onClose, onNext }) {
   // In audio-fix mode the <video> only knows the time since its own (re)start, so the real position
   // is the stream's start offset plus the video's currentTime. Everything below goes through these.
   fixOnRef.current = fixOn;
-  baseRef.current = fixOn ? fixOffset : 0;
+  convertRef.current = convertOn;
+  baseRef.current = fixOn ? fixOffset : convertOn ? convertOffset : 0;
   durRef.current = Number.isFinite(duration) && duration > 0 ? duration : 0;
 
   const videoSrc = stream
-    ? fixOn
+    ? convertOn
+      ? `${BASE}/api/video/convert?${stream.localId ? `libraryId=${stream.localId}` : `hash=${stream.hash}&index=${stream.fileIndex}`}&t=${Math.floor(convertOffset)}&height=${convertHeight}`
+    : fixOn
       ? `${BASE}/api/audiofix/stream?hash=${stream.hash}&index=${stream.fileIndex}&t=${Math.floor(fixOffset)}&a=${fixTrack}`
       : stream.streamUrl
     : null;
@@ -243,6 +252,12 @@ export default function Player({ spec, onClose, onNext }) {
     };
     if (beacon) sendBeaconJson('/api/progress', body);
     else api('/api/progress', { method: 'POST', body }).catch(() => {});
+    // Cross-device presence is scoped to the active profile and expires after 5 minutes.
+    const presence={deviceId:localDeviceId(),deviceName:localDeviceName(),contentKey:metaRef.current.contentKey,
+      mediaType:metaRef.current.mediaType,tmdbId:metaRef.current.tmdbId,season:metaRef.current.season,
+      episode:metaRef.current.episode,title:metaRef.current.title,positionSeconds:t,durationSeconds:d,profileId:getProfileId()};
+    if(beacon)sendBeaconJson('/api/playback/presence',presence);
+    else api('/api/playback/presence',{method:'POST',body:presence}).catch(()=>{});
   }, []);
 
   // Download the very file that is playing (it is already registered, so this starts at once).
@@ -257,6 +272,27 @@ export default function Player({ spec, onClose, onNext }) {
     a.remove();
     notify(`Downloading ${st.fileName} (${st.fileSize})`);
   }, [notify]);
+
+  const saveCurrentToServer=useCallback(async()=>{
+    const data=streamRef.current;
+    if(!data?.hash||!data?.fileIndex)return;
+    setSaveBusy(true);
+    try{
+      await api('/api/downloads/queue',{method:'POST',body:{hash:data.hash,index:data.fileIndex,
+        contentKey:data.contentKey,mediaType:spec.type,tmdbId:spec.tmdbId||null,season:spec.season,episode:spec.episode,title:spec.title||data.fileName}});
+      notify(t('Added to the server download queue.'));
+    }catch(e){notify(e.message);}finally{setSaveBusy(false);}
+  },[spec,notify,t]);
+
+  // Another device can explicitly take over this active viewing session.
+  useEffect(()=>{
+    if(phase!=='ready')return;
+    const check=()=>api(`/api/playback/commands?deviceId=${encodeURIComponent(localDeviceId())}`)
+      .then(d=>{if(d.targetDevice){videoRef.current?.pause();reportNow();notify(t('Playback moved to another device.'));onClose();}})
+      .catch(()=>{});
+    const timer=setInterval(check,6000);
+    return()=>clearInterval(timer);
+  },[phase,reportNow,notify,t,onClose]);
 
   useEffect(() => {
     if (!nowPlaying) return undefined;
@@ -314,6 +350,8 @@ export default function Player({ spec, onClose, onNext }) {
       setBuffering(true);
       setPickerOpen(false);
       setFixOn(false);
+      setConvertOn(false);
+      setConvertOffset(0);
       setFixOffset(0);
       setNoAudioHint(false);
       const failures = failedRef.current.size;
@@ -332,10 +370,21 @@ export default function Player({ spec, onClose, onNext }) {
         try {
           const p = await api(`/api/progress/get?contentKey=${encodeURIComponent(contentKey)}`);
           if (cancelled) return;
-          resumeAtRef.current = p.positionSeconds || 0;
+          resumeAtRef.current = Math.max(Number(spec.resumeAt)||0,p.positionSeconds||0);
         } catch {
           /* start from the beginning */
         }
+      }
+
+      if(spec.localId){
+        const data={localId:spec.localId,streamUrl:`${BASE}/api/library/stream/${encodeURIComponent(spec.localId)}`,
+          contentKey,fileName:spec.fileName||'Saved video',magnet:null,fileIndex:null,hash:null};
+        metaRef.current={contentKey,mediaType:spec.type,tmdbId:spec.tmdbId,season:spec.season,episode:spec.episode,
+          title:spec.title,subtitle:spec.episodeTitle||null,year:spec.year,poster:spec.poster,backdrop:spec.backdrop,
+          magnet:null,sizeLabel:null,indexer:'Local library'};
+        streamRef.current=data;
+        setStream(data);setSubtitleFiles([]);setPhase('ready');setMessage('Buffering saved video…');
+        return;
       }
 
       let lastError = null;
@@ -642,7 +691,7 @@ export default function Player({ spec, onClose, onNext }) {
     if (!v) return;
     const total = durRef.current || Infinity;
     const t = Math.max(0, Math.min(total - 1, target));
-    if (!fixOnRef.current) {
+    if (!fixOnRef.current && !convertRef.current) {
       v.currentTime = t;
       return;
     }
@@ -656,7 +705,8 @@ export default function Player({ spec, onClose, onNext }) {
       setBuffering(true);
       setTime(t);
       lastPos.current = { t, d: durRef.current };
-      setFixOffset(Math.floor(t));
+      if(convertRef.current)setConvertOffset(Math.floor(t));
+      else setFixOffset(Math.floor(t));
     }
   }, []);
 
@@ -719,7 +769,7 @@ export default function Player({ spec, onClose, onNext }) {
 
   const toggleFix = useCallback(async () => {
     const s = streamRef.current;
-    if (fixBusy || !s) return;
+    if (fixBusy || !s || convertRef.current || s.localId) return;
     const at = currentAbs();
 
     if (fixOnRef.current) {
@@ -731,6 +781,8 @@ export default function Player({ spec, onClose, onNext }) {
       seekingRef.current = false;
       setBuffering(true);
       setFixOn(false);
+      setConvertOn(false);
+      setConvertOffset(0);
       setFixOffset(0);
       return;
     }
@@ -757,6 +809,23 @@ export default function Player({ spec, onClose, onNext }) {
       setFixBusy(false);
     }
   }, [fixBusy, fixInfo, notify]);
+
+  const toggleConvert=useCallback(()=>{
+    const s=streamRef.current;
+    if(!s)return;
+    const at=currentAbs();
+    if(convertRef.current){
+      resumeAtRef.current=at;resumedRef.current=false;
+      setConvertOn(false);setConvertOffset(0);
+    } else {
+      setFixOn(false);setFixOffset(0);
+      setNoAudioHint(false);
+      setConvertOffset(Math.floor(at));
+      resumedRef.current=true;
+      setConvertOn(true);setPhase('ready');
+    }
+    setBuffering(true);
+  },[]);
 
   const changeTrack = (ord) => {
     setAudioMenu(false);
@@ -861,9 +930,9 @@ export default function Player({ spec, onClose, onNext }) {
 
   const onLoadedMetadata = (e) => {
     const v = e.currentTarget;
-    if (!fixOnRef.current) setDuration(v.duration);
+    if (!fixOnRef.current && !convertRef.current) setDuration(v.duration);
     const r = resumeAtRef.current;
-    if (!resumedRef.current && !fixOnRef.current && r > 10 && Number.isFinite(v.duration) && r < v.duration - 15) {
+    if (!resumedRef.current && !fixOnRef.current && !convertRef.current && r > 10 && Number.isFinite(v.duration) && r < v.duration - 15) {
       seekingRef.current = true;
       v.currentTime = r;
     }
@@ -877,7 +946,7 @@ export default function Player({ spec, onClose, onNext }) {
     const base = baseRef.current;
     const abs = base + v.currentTime;
     setTime(abs);
-    const d = fixOnRef.current ? durRef.current : Number.isFinite(v.duration) ? v.duration : 0;
+    const d = (fixOnRef.current || convertRef.current) ? durRef.current : Number.isFinite(v.duration) ? v.duration : 0;
     lastPos.current = { t: abs, d };
     const b = v.buffered;
     let end = 0;
@@ -889,9 +958,9 @@ export default function Player({ spec, onClose, onNext }) {
 
   const onEnded = () => {
     const { t, d } = lastPos.current;
-    if (fixOnRef.current && d && t < d - 45) {
+    if ((fixOnRef.current || convertRef.current) && d && t < d - 45) {
       setPhase('error');
-      setErrorText('The audio-fix stream stopped early. Try again.');
+      setErrorText('The converted stream stopped early. Try again.');
       return;
     }
     lastPos.current = { t: d, d };
@@ -1021,7 +1090,7 @@ export default function Player({ spec, onClose, onNext }) {
           onDoubleClick={toggleFs}
           onLoadedMetadata={onLoadedMetadata}
           onDurationChange={(e) => {
-            if (!fixOnRef.current) setDuration(e.currentTarget.duration);
+            if (!fixOnRef.current && !convertRef.current) setDuration(e.currentTarget.duration);
           }}
           onTimeUpdate={onTimeUpdate}
           onPlay={() => setPlaying(true)}
@@ -1171,7 +1240,7 @@ export default function Player({ spec, onClose, onNext }) {
           </div>
         )}
 
-        {phase === 'ready' && (
+        {phase === 'ready' && !convertOn && !stream?.localId && (
           <button
             onClick={toggleFix}
             disabled={fixBusy}
@@ -1183,6 +1252,19 @@ export default function Player({ spec, onClose, onNext }) {
             {t(fixBusy ? 'Preparing…' : fixOn ? 'Audio fix: On' : 'Audio fix')}
           </button>
         )}
+        {(phase==='ready' || phase==='error') && streamRef.current && <button onClick={toggleConvert}
+          aria-pressed={convertOn} title={t('Compatibility mode: convert video to H.264 and audio to AAC. Only one stream can convert at a time.')}
+          className={cx(topBtn,convertOn && '!bg-white !text-black')}>
+          {t(convertOn?'Video conversion: On':'Convert video')} ({convertHeight}p)
+        </button>}
+        {phase==='ready' && streamRef.current && <label className="flex items-center gap-1 text-xs text-white/70">
+          <span className="hidden sm:inline">{t('Conversion quality')}</span>
+          <select aria-label={t('Conversion quality')} className="rounded bg-black/80 p-2" value={convertHeight}
+            onChange={e=>{setConvertHeight(Number(e.target.value));if(convertRef.current)setConvertOffset(Math.floor(currentAbs()));}}>
+            <option value={480}>480p</option><option value={720}>720p</option>
+          </select></label>}
+        {phase==='ready' && stream?.hash && <button disabled={saveBusy} onClick={saveCurrentToServer} className={topBtn}
+          title={t('Save this video in the server library')}>{t(saveBusy?'Saving…':'Save on server')}</button>}
         <button onClick={() => setPickerOpen((v) => !v)} aria-pressed={pickerOpen} className={cx(topBtn, pickerOpen && 'bg-white/15')}>
           <ListIcon size={20} /> <Localized text={"Sources"} />{playingAttempt && (
             <span className="hidden items-center gap-1 rounded bg-white/15 px-1.5 py-px text-[11px] font-bold sm:inline-flex">
@@ -1219,6 +1301,9 @@ export default function Player({ spec, onClose, onNext }) {
       )}
 
       {/* "no sound?" hint */}
+      {phase==='error' && streamRef.current && <button onClick={toggleConvert}
+        className="absolute bottom-28 left-1/2 z-30 -translate-x-1/2 rounded bg-white px-4 py-3 font-bold text-black">{t('Try compatible video (480/720p)')}</button>}
+
       {noAudioHint && !fixOn && phase === 'ready' && !pickerOpen && (
         <div className="absolute bottom-32 left-1/2 z-10 w-[min(92vw,470px)] -translate-x-1/2 animate-fadeInUp rounded-md border border-white/20 bg-black/90 p-4 shadow-2xl backdrop-blur">
           <p className="font-bold"><Localized text={"No sound?"} /></p>

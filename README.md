@@ -238,3 +238,8 @@ cd frontend && npm install && npm run build
 ```
 
 The GitHub Actions workflow builds the frontend and checks the tests on pushes and pull requests. Browser/video/device behavior should still be checked against a live Prowlarr/TorrServer instance after deployment.
+
+
+## Phase 3: Advanced streaming
+
+Features: persistent server download queue and profile-owned local library; opt-in single-session 480p/720p H.264/AAC conversion; per-profile preferred quality and direct stream bandwidth limits; admin monitoring, quotas and online SQLite backups; active-profile device playback handoff. Full behavior and safe-upgrade instructions: [Advanced streaming](docs/advanced-streaming.md). No new environment variables or Docker mounts required.

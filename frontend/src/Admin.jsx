@@ -1,3 +1,4 @@
+import { AdvancedAdmin } from './Advanced';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from './api';
 import { useLocale } from './locale';
@@ -88,6 +89,7 @@ export default function Admin() {
           </div>)}
         </div>
       </section>
+      <AdvancedAdmin />
     </div>
   );
 }
