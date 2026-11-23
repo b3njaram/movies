@@ -142,7 +142,19 @@ def main():
                 page.goto(origin + '/offline.html')
                 expect(page.get_by_text('End to end movie')).to_be_visible(timeout=10000)
                 page.get_by_role('button', name='Play offline').click()
-                page.wait_for_function("document.querySelector('video').readyState >= 1", timeout=15000)
+                try:
+                    page.wait_for_function("document.querySelector('video').readyState >= 1", timeout=12000)
+                except Exception:
+                    state = page.evaluate('''() => {
+                        const v=document.querySelector('video');
+                        return {notice:document.getElementById('notice').textContent,
+                          visible:!document.getElementById('player').hidden,
+                          url:v.currentSrc,readyState:v.readyState,networkState:v.networkState,
+                          error:v.error?.message||null,mediaErrorCode:v.error?.code||null,
+                          videoType:v.getAttribute('type')};
+                    }''')
+                    raise AssertionError(f'Offline player did not load video metadata: {state}')
+
                 assert page.locator('video').evaluate('el => el.currentSrc.startsWith("blob:")')
                 print('PASS: interrupted download resumed with exact verified bytes, storage budget, airplane-mode reload, video playback')
                 browser.close()
