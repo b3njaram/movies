@@ -25,6 +25,7 @@ import { getRankedSources, rememberSuccessfulSource } from './compat';
 import { useLocale } from './locale';
 import { nearestInDirection } from './tv-spatial';
 import {localDeviceId,localDeviceName} from './device';
+import {decideStall} from './stall-recovery';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -103,6 +104,9 @@ export default function Player({ spec, onClose, onNext }) {
   const failedRef = useRef(new Set()); // source links that connected but would not play
   const currentLinkRef = useRef(null); // the source currently being played
   const playedRef = useRef(false); // has this source produced picture yet?
+  const lastAdvanceRef = useRef(Date.now());
+  const lastAbsRef = useRef(0);
+  const softRetryRef = useRef(0);
   const forcedRef = useRef(null);
 
   const [phase, setPhase] = useState('resolving'); // resolving | ready | error
@@ -148,6 +152,10 @@ export default function Player({ spec, onClose, onNext }) {
   const [convertOffset,setConvertOffset]=useState(0);
   const [convertHeight,setConvertHeight]=useState(720);
   const [saveBusy,setSaveBusy]=useState(false);
+  const [partyCode,setPartyCode]=useState(spec.partyCode||null);
+  const [partyHost,setPartyHost]=useState(Boolean(spec.partyHost));
+  const [partyViewers,setPartyViewers]=useState(1);
+
   const [fixOffset, setFixOffset] = useState(0);
   const [fixTrack, setFixTrack] = useState(0);
   const [fixInfo, setFixInfo] = useState(null);
@@ -338,6 +346,9 @@ export default function Player({ spec, onClose, onNext }) {
     resumedRef.current = false;
     seekingRef.current = false;
     playedRef.current = false;
+    lastAdvanceRef.current = Date.now();
+    lastAbsRef.current = 0;
+    softRetryRef.current = 0;
     currentLinkRef.current = null;
     for (const a of attemptsRef.current) if (a.status === 'playing') a.status = 'switched';
     setAttempts(attemptsRef.current.map((x) => ({ ...x })));
@@ -374,6 +385,16 @@ export default function Player({ spec, onClose, onNext }) {
         } catch {
           /* start from the beginning */
         }
+      }
+
+      if(spec.localMediaId){
+        const data={localMediaId:spec.localMediaId,streamUrl:`${BASE}/api/local-media/stream/${encodeURIComponent(spec.localMediaId)}`,
+          contentKey,fileName:spec.title||'Local video',magnet:null,fileIndex:null,hash:null};
+        metaRef.current={contentKey,mediaType:'raw',tmdbId:null,season:spec.season,episode:spec.episode,
+          title:spec.title,subtitle:null,year:null,poster:null,backdrop:null,
+          magnet:null,sizeLabel:null,indexer:'Local media'};
+        streamRef.current=data;setStream(data);setSubtitleFiles([]);setPhase('ready');setMessage('Buffering local video…');
+        return;
       }
 
       if(spec.localId){
@@ -614,6 +635,45 @@ export default function Player({ spec, onClose, onNext }) {
     return () => clearTimeout(t);
   }, [phase, videoSrc, failCurrent]);
 
+  // Self-healing: retry a silent stream once before switching automatic sources.
+  // Preserve the exact viewing timestamp; manual choices never silently switch.
+  useEffect(() => {
+    if (phase !== 'ready' || !videoSrc) return undefined;
+    const id = setInterval(() => {
+      const v = videoRef.current;
+      if (!v || !v.readyState || !canReport.current) return;
+      const now = Date.now();
+      const outcome = decideStall({now,lastProgress:lastAdvanceRef.current,softAt:softRetryRef.current,
+        paused:v.paused,seeking:v.seeking,forced:!!forcedRef.current,local:!!streamRef.current?.localId,
+        failures:failedRef.current.size,maxFailures:MAX_FALLBACKS});
+      if (outcome === 'none') return;
+      const at=baseRef.current+v.currentTime;
+      resumeAtRef.current=at;
+      lastPos.current={t:at,d:durRef.current};
+      if (outcome === 'retry') {
+        softRetryRef.current=now;
+        setBuffering(true);
+        setMessage('Playback stalled — reconnecting…');
+        if (fixOnRef.current || convertRef.current) {
+          if(convertRef.current) setConvertOffset(Math.floor(at));
+          else setFixOffset(Math.floor(at));
+        } else {
+          resumedRef.current=false;
+          v.load();
+        }
+      } else if (outcome === 'switch' && currentLinkRef.current) {
+        failedRef.current.add(currentLinkRef.current);
+        markAttempt(currentLinkRef.current,{status:'failed',reason:'Playback stalled after reconnect'});
+        reportNow();
+        setAttempt(n=>n+1);
+      } else if (outcome === 'notify') {
+        setPhase('error');
+        setErrorText('Playback stalled. Retry this source or choose another in Sources.');
+      }
+    },4000);
+    return()=>clearInterval(id);
+  },[phase,videoSrc,markAttempt,reportNow]);
+
   // Peer / speed readout (also tells the server this stream is still in use).
   useEffect(() => {
     if (phase !== 'ready' || !stream?.hash) return undefined;
@@ -709,6 +769,43 @@ export default function Player({ spec, onClose, onNext }) {
       else setFixOffset(Math.floor(t));
     }
   }, []);
+
+  // Watch parties synchronize time and pause/play state, not media URLs or
+  // authentication. Every participant resolves and streams their own source.
+  useEffect(()=>{
+    if(!partyCode||phase!=='ready')return undefined;
+    let active=true;
+    const pulse=async()=>{
+      const v=videoRef.current;
+      if(!v||!active)return;
+      try{
+        if(partyHost){
+          const d=await api(`/api/community/parties/${partyCode}`,{method:'PUT',body:{
+            positionSeconds:Math.max(0,baseRef.current+v.currentTime),playing:!v.paused&&!v.ended}});
+          if(active)setPartyViewers(d.party.viewers);
+        }else{
+          const d=await api(`/api/community/parties/${partyCode}`);
+          const room=d.party;
+          if(!active)return;
+          setPartyViewers(room.viewers);
+          const fresh=Date.now()-room.updatedAt<30000;
+          const position=room.positionSeconds+(room.playing&&fresh?Math.max(0,(Date.now()-room.updatedAt)/1000):0);
+          if(fresh){
+            const actual=baseRef.current+v.currentTime;
+            if(Math.abs(actual-position)>4 && !v.seeking)seekTo(position);
+            if(room.playing&&v.paused&&!v.ended)v.play().catch(()=>{});
+            if(!room.playing&&!v.paused)v.pause();
+          }
+        }
+      }catch(e){if(active&&[403,404].includes(e.status)){setPartyCode(null);notify(t('Watch party ended or expired.'));}}
+    };
+    pulse();const id=setInterval(pulse,3000);
+    return()=>{active=false;clearInterval(id);};
+  },[partyCode,partyHost,phase,seekTo,notify,t]);
+
+  useEffect(()=>()=>{
+    if(partyCode)api(`/api/community/parties/${partyCode}`,{method:'DELETE'}).catch(()=>{});
+  },[partyCode]);
 
   const seekBy = useCallback(
     (delta) => {
@@ -945,6 +1042,11 @@ export default function Player({ spec, onClose, onNext }) {
     const v = e.currentTarget;
     const base = baseRef.current;
     const abs = base + v.currentTime;
+    if (abs > lastAbsRef.current + 0.2 || abs < lastAbsRef.current - 1) {
+      lastAdvanceRef.current = Date.now();
+      if (abs > lastAbsRef.current + 0.2) softRetryRef.current = 0;
+    }
+    lastAbsRef.current = abs;
     setTime(abs);
     const d = (fixOnRef.current || convertRef.current) ? durRef.current : Number.isFinite(v.duration) ? v.duration : 0;
     lastPos.current = { t: abs, d };
@@ -1077,6 +1179,14 @@ export default function Player({ spec, onClose, onNext }) {
       className="sh-player fixed inset-0 z-[200] select-none overflow-hidden bg-black text-white"
       style={{ cursor: hideCursor ? 'none' : 'default' }}
     >
+      {partyCode && <div className="absolute left-1/2 top-16 z-[80] flex -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-lg bg-black/80 px-4 py-2 text-xs shadow-lg sm:text-sm">
+        <span>{t('Watch party')}: <strong className="select-text tracking-widest">{partyCode}</strong></span>
+        <span>{partyViewers} {t('viewers')}</span>
+        <button className="rounded border border-white/40 px-2 py-1 hover:bg-white/15" onClick={()=>navigator.clipboard?.writeText(partyCode).catch(()=>{})}>{t('Copy code')}</button>
+        <button className="rounded border border-white/40 px-2 py-1 hover:bg-white/15" onClick={()=>{
+          api(`/api/community/parties/${partyCode}`,{method:'DELETE'}).catch(()=>{});setPartyCode(null);
+        }}>{t(partyHost?'End party':'Leave party')}</button>
+      </div>}
       {videoSrc && phase === 'ready' && (
         <video
           key={videoSrc}
@@ -1095,6 +1205,7 @@ export default function Player({ spec, onClose, onNext }) {
           onTimeUpdate={onTimeUpdate}
           onPlay={() => setPlaying(true)}
           onPlaying={() => {
+            lastAdvanceRef.current=Date.now();
             if (!playedRef.current && currentLinkRef.current) {
               markAttempt(currentLinkRef.current, { status: 'playing', reason: '' });
               setNowPlaying(currentLinkRef.current);

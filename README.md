@@ -1,5 +1,8 @@
 # StreamHub
 
+**Phase 4:** bounded self-healing playback, protected per-profile collections, title requests with an admin review queue, synchronized watch parties, local-media scanning in the existing data mount, and a host-side verified backup/restore helper. See [Phase 4 guide](docs/phase4.md) and [safe updates/backups](docs/updates-and-backups.md). All existing `.env` and Docker mounts remain unchanged. **New features are additive** and do not erase accounts, watch history or saved media.
+
+
 **Phase 2:** TV remote navigation and browser-native casting, manual Skip Intro/Credits markers, on-demand timeline preview frames, per-profile recommendations and Discover filters, and PIN-protected profiles with server-enforced age limits. See [Phase 2 guide](docs/premium-experience.md).
 
 A self-hosted, Netflix-style streaming front end for **your own** Prowlarr indexers and TorrServer.
