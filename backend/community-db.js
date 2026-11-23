@@ -151,3 +151,39 @@ export function leaveParty(profileId,code) {
   if(room.isHost)db.prepare('DELETE FROM community_parties WHERE code=?').run(room.code);
   else db.prepare('DELETE FROM community_party_members WHERE code=? AND profile_id=?').run(room.code,profileId);
 }
+
+// Phase 5: chat belongs to the room, never to a public URL or another profile.
+db.exec(`CREATE TABLE IF NOT EXISTS community_party_chat (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ code TEXT NOT NULL, profile_id INTEGER NOT NULL,
+ message TEXT NOT NULL,created_at INTEGER NOT NULL,
+ FOREIGN KEY(code) REFERENCES community_parties(code) ON DELETE CASCADE,
+ FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_party_chat ON community_party_chat(code,id DESC);`);
+const lastPartyMessage=new Map();
+export function listPartyChat(profileId,code,after=0){
+  const party=partyDetails(profileId,code); // Throws unless already a member.
+  const since=Number(after);
+  if(!Number.isSafeInteger(since)||since<0)fail('Invalid message cursor.',400);
+  const rows=db.prepare(`SELECT c.id,p.name AS sender,c.message,c.created_at AS createdAt
+    FROM community_party_chat c JOIN profiles p ON p.id=c.profile_id
+    WHERE c.code=? AND c.id>? ORDER BY c.id DESC LIMIT 40`).all(party.code,since);
+  return rows.reverse();
+}
+export function sendPartyChat(profileId,code,text){
+  const party=partyDetails(profileId,code);
+  const message=String(text||'').replace(/[\x00-\x08\x0b-\x1f\x7f]/g,'').trim();
+  if(!message||message.length>300)fail('Messages must contain 1–300 characters.',400);
+  const key=`${party.code}:${profileId}`;
+  const ts=now();
+  if(ts-(lastPartyMessage.get(key)||0)<1500)fail('Slow down before sending another message.',429);
+  if(lastPartyMessage.size>2000)lastPartyMessage.clear();
+  lastPartyMessage.set(key,ts);
+  db.prepare('INSERT INTO community_party_chat(code,profile_id,message,created_at) VALUES(?,?,?,?)')
+    .run(party.code,profileId,message,ts);
+  // Keep at most 300 messages per party, bounded disk use.
+  db.prepare(`DELETE FROM community_party_chat WHERE code=? AND id NOT IN (
+    SELECT id FROM community_party_chat WHERE code=? ORDER BY id DESC LIMIT 300)`).run(party.code,party.code);
+  return {ok:true};
+}

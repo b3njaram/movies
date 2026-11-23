@@ -66,6 +66,13 @@ test('community endpoints isolate profiles, enforce host-only updates, and guard
     assert.equal((await bob.send(`/api/community/parties/${code}`,'PUT',{positionSeconds:30,playing:true},bob.id)).status,403);
     assert.equal((await alice.send(`/api/community/parties/${code}`,'PUT',{positionSeconds:30,playing:true},alice.id)).status,200);
     assert.equal((await bob.send(`/api/community/parties/${code}`,'GET',null,bob.id)).data.party.positionSeconds,30);
+    // Phase 5 watch-party messages require room membership and are rate-limited.
+    assert.equal((await alice.send(`/api/community/parties/${code}/chat`,'POST',{message:'Welcome!'},alice.id)).status,201);
+    assert.equal((await bob.send(`/api/community/parties/${code}/chat`,'GET',null,bob.id)).data.messages[0].message,'Welcome!');
+    assert.equal((await bob.send(`/api/community/parties/${code}/chat`,'POST',{message:'Hi!'},bob.id)).status,201);
+    assert.equal((await bob.send(`/api/community/parties/${code}/chat`,'POST',{message:'Flood'},bob.id)).status,429);
+    assert.equal((await alice.send(`/api/community/parties/${code}/chat`,'GET',null,alice.id)).data.messages.length,2);
+
     const media=join(dir,'app','media');mkdirSync(media);writeFileSync(join(media,'Test.Movie.2020.mp4'),Buffer.alloc(4096,65));
     assert.equal((await alice.send('/api/admin/local-media/scan','POST',{},alice.id)).status,200);
     const items=(await bob.send('/api/local-media','GET',null,bob.id)).data.items;

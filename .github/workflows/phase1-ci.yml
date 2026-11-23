@@ -1,7 +1,7 @@
 name: StreamHub checks
 on:
   push:
-    branches: [main, 'phase1-*', 'phase2-*', 'phase3-*', 'phase4-*']
+    branches: [main, 'phase1-*', 'phase2-*', 'phase3-*', 'phase4-*', 'phase5-*']
   pull_request:
     branches: [main]
 jobs:
@@ -28,6 +28,8 @@ jobs:
       - name: Validate backend JavaScript
         run: |
           node --check backend/community-db.js
+          node --check backend/metadata-match.js
+          node --check backend/local-subtitles.js
           node --check backend/community-rules.js
           node --check backend/local-media.js
           node --check backend/local-media-rules.js

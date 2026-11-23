@@ -155,6 +155,11 @@ export default function Player({ spec, onClose, onNext }) {
   const [partyCode,setPartyCode]=useState(spec.partyCode||null);
   const [partyHost,setPartyHost]=useState(Boolean(spec.partyHost));
   const [partyViewers,setPartyViewers]=useState(1);
+  const [partyChatOpen,setPartyChatOpen]=useState(false);
+  const [partyMessages,setPartyMessages]=useState([]);
+  const [partyDraft,setPartyDraft]=useState('');
+  const [partySending,setPartySending]=useState(false);
+
 
   const [fixOffset, setFixOffset] = useState(0);
   const [fixTrack, setFixTrack] = useState(0);
@@ -587,15 +592,19 @@ export default function Player({ spec, onClose, onNext }) {
     return () => video.removeEventListener('loadedmetadata', apply);
   }, [subtitleFiles, localSubtitle, profile?.subLang, videoSrc]);
 
-  // Subtitles are optional: discovered from sidecar files in this release.
+  // Sidecar subtitles for torrents; embedded text tracks for local and saved files.
   useEffect(() => {
-    if (!stream?.hash || !stream?.fileIndex) return undefined;
-    let alive = true;
-    api(`/api/subtitles?hash=${stream.hash}&index=${stream.fileIndex}`)
-      .then(d => { if (alive) setSubtitleFiles(d.subtitles || []); })
-      .catch(() => { if (alive) setSubtitleFiles([]); });
-    return () => { alive = false; };
-  }, [stream?.hash, stream?.fileIndex]);
+    let endpoint=null;
+    if(stream?.localMediaId)endpoint=`/api/subtitles/embedded/media/${encodeURIComponent(stream.localMediaId)}`;
+    else if(stream?.localId)endpoint=`/api/subtitles/embedded/library/${encodeURIComponent(stream.localId)}`;
+    else if(stream?.hash && stream?.fileIndex)endpoint=`/api/subtitles?hash=${stream.hash}&index=${stream.fileIndex}`;
+    if(!endpoint)return undefined;
+    let alive=true;
+    api(endpoint).then(d=>{if(alive)setSubtitleFiles((d.subtitles||[]).map(f=>({
+      ...f,embedded:Boolean(stream?.localMediaId||stream?.localId)})));})
+      .catch(()=>{if(alive)setSubtitleFiles([]);});
+    return ()=>{alive=false;};
+  }, [stream?.hash,stream?.fileIndex,stream?.localMediaId,stream?.localId]);
 
   useEffect(() => () => { if (subtitleUrl.current) URL.revokeObjectURL(subtitleUrl.current); }, []);
   const loadCustomSubtitle = (file) => {
@@ -704,6 +713,26 @@ export default function Player({ spec, onClose, onNext }) {
       alive = false;
     };
   }, [phase, spec.type, spec.tmdbId, spec.season, spec.episode]);
+
+  // Room chat is read only after joining; the server authorizes each request.
+  useEffect(()=>{
+    if(!partyCode)return undefined;
+    let alive=true;
+    const poll=()=>api(`/api/community/parties/${partyCode}/chat`)
+      .then(d=>{if(alive)setPartyMessages(d.messages||[]);}).catch(()=>{});
+    poll();const timer=setInterval(poll,3500);
+    return ()=>{alive=false;clearInterval(timer);};
+  },[partyCode]);
+  const sendPartyMessage=async event=>{
+    event.preventDefault();
+    const message=partyDraft.trim();if(!message||partySending||!partyCode)return;
+    setPartySending(true);
+    try {await api(`/api/community/parties/${partyCode}/chat`,{method:'POST',body:{message}});
+      setPartyDraft('');
+      const d=await api(`/api/community/parties/${partyCode}/chat`);
+      setPartyMessages(d.messages||[]);
+    } catch(e){notify(e.message);}finally{setPartySending(false);}
+  };
 
   // ---------------------------------------------------------------------
   // Controls
@@ -1183,10 +1212,19 @@ export default function Player({ spec, onClose, onNext }) {
         <span>{t('Watch party')}: <strong className="select-text tracking-widest">{partyCode}</strong></span>
         <span>{partyViewers} {t('viewers')}</span>
         <button className="rounded border border-white/40 px-2 py-1 hover:bg-white/15" onClick={()=>navigator.clipboard?.writeText(partyCode).catch(()=>{})}>{t('Copy code')}</button>
+        <button className="rounded border border-white/40 px-2 py-1 hover:bg-white/15" onClick={()=>setPartyChatOpen(v=>!v)}>{t('Chat')}</button>
         <button className="rounded border border-white/40 px-2 py-1 hover:bg-white/15" onClick={()=>{
           api(`/api/community/parties/${partyCode}`,{method:'DELETE'}).catch(()=>{});setPartyCode(null);
         }}>{t(partyHost?'End party':'Leave party')}</button>
       </div>}
+      {partyCode && partyChatOpen && <aside className="absolute right-3 top-32 z-[90] flex h-[min(55vh,400px)] w-[min(88vw,340px)] flex-col rounded-lg border border-white/20 bg-black/90 p-3 shadow-xl">
+        <div className="mb-2 flex items-center justify-between"><strong>{t('Watch party chat')}</strong><button className="px-2" aria-label={t('Close')} onClick={()=>setPartyChatOpen(false)}>✕</button></div>
+        <div role="log" aria-live="polite" className="min-h-0 flex-1 space-y-2 overflow-y-auto text-sm">
+          {partyMessages.map(msg=><p key={msg.id} className="break-words"><strong className="text-sky-300">{msg.sender}: </strong>{msg.message}</p>)}
+        </div>
+        <form onSubmit={sendPartyMessage} className="mt-2 flex gap-2"><input className="min-w-0 flex-1 rounded bg-white/15 px-2 py-2 text-white" maxLength={300} value={partyDraft} onChange={e=>setPartyDraft(e.target.value)} placeholder={t('Message')}/>
+          <button className="rounded bg-white px-3 font-semibold text-black" type="submit" disabled={partySending||!partyDraft.trim()}>{t('Send')}</button></form>
+      </aside>}
       {videoSrc && phase === 'ready' && (
         <video
           key={videoSrc}
@@ -1232,9 +1270,10 @@ export default function Player({ spec, onClose, onNext }) {
           onError={onVideoError}
         >
           {subtitleFiles.map((f) => (
-            <track key={`${stream.hash}:${f.index}`} kind="subtitles"
-              label={`${f.lang.toUpperCase()} · ${f.name}`} srcLang={f.lang === 'und' ? 'en' : f.lang}
-              src={`${BASE}/api/subtitles/file?hash=${stream.hash}&index=${f.index}&videoIndex=${stream.fileIndex}`}
+            <track key={`${stream.localMediaId||stream.localId||stream.hash}:${f.index}`} kind="subtitles"
+              label={`${f.lang.toUpperCase()} · ${f.title||f.name||f.codec||'Subtitles'}`} srcLang={f.lang === 'und' ? 'en' : f.lang}
+              src={f.embedded ? `${BASE}/api/subtitles/embedded/${stream.localMediaId?'media':'library'}/${stream.localMediaId||stream.localId}?track=${f.index}`
+                : `${BASE}/api/subtitles/file?hash=${stream.hash}&index=${f.index}&videoIndex=${stream.fileIndex}`}
               default={profile?.subLang !== 'off' && f.lang === profile?.subLang && subtitleFiles.find(x => x.lang === profile.subLang)?.index === f.index} />
           ))}
           {localSubtitle && <track key={localSubtitle.url} kind="subtitles" label={localSubtitle.name} srcLang="en" src={localSubtitle.url} default />}
