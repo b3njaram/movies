@@ -11,6 +11,7 @@ import {
   updateProfile,
   deleteProfile,
   listProfiles,
+  profileSecurity, setProfilePin, getSkipMarkers, putSkipMarkers,
   upsertProgress,
   getProgressByKey,
   getTitleProgress,
@@ -19,7 +20,7 @@ import {
   addToMyList,
   removeFromMyList,
 } from './db.js';
-import { verifyPassword, issueSession, clearSession, requireAuth, getSessionUser } from './auth.js';
+import { verifyPassword, hashPassword, issueSession, clearSession, requireAuth, getSessionUser, issueActiveProfile, clearActiveProfile, getActiveProfileId } from './auth.js';
 import {
   tmdbEnabled,
   httpError,
@@ -31,11 +32,13 @@ import {
   getFirstEpisode,
   getEpisodeName,
   searchTitles,
-  getLocalizedTitle,
+  getLocalizedTitle, getDiscover, getRecommendations,
 } from './tmdb.js';
 import { searchSources, lookupRef, bytesToSize, describeRelease } from './sources.js';
 import { listAccounts, createAccount, updateAccount, adminSummary } from './admin.js';
 import { validatedFileRef, listSubtitleFiles, toVtt } from './subtitles.js';
+import { allowedByRating, maxAgeValue, cleanMarkers, safeContentKey, cleanDiscoverFilters } from './premium.js';
+import { thumbnailFor } from './preview.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
 const PROWLARR_API_KEY = process.env.PROWLARR_API_KEY || '';
@@ -104,12 +107,27 @@ app.get('/api/auth/me', (req, res) => {
 app.use('/api', requireAuth);
 
 // Used by nginx (auth_request) to protect /stream/* with the same session.
-app.get('/api/auth/check', (req, res) => res.sendStatus(204));
+// Nginx auth_request must also see the signed active profile. Checking only the
+// account would let a restricted viewer bypass restrictions by requesting /stream/.
+app.get('/api/auth/check', (req, res) => {
+  const pid = getActiveProfileId(req, req.user);
+  if (!pid) return res.sendStatus(403);
+  const profile = getProfile(req.user.id, pid);
+  if (!profile) return res.sendStatus(403);
+  if (profile.maxAge < 18) {
+    const uri = req.get('x-original-uri') || '';
+    const url = new URL(uri, 'http://local');
+    const hash = url.searchParams.get('link');
+    if (!hash || !isGrantedHash(req.user.id, pid, hash)) return res.sendStatus(403);
+  }
+  return res.sendStatus(204);
+});
 
 // Browser-facing administration is role checked on every request, not by a
 // flag sent from the browser. A disabled user loses access immediately.
 function requireAdmin(req, res, next) {
-  if (!req.user.isAdmin) return res.status(403).json({ error: 'Administrator access required.' });
+  const selected = activeProfile(req);
+  if (!req.user.isAdmin || !selected || selected.maxAge < 18) return res.status(403).json({ error: 'An unrestricted administrator profile is required.' });
   next();
 }
 
@@ -143,39 +161,154 @@ function cleanProfileInput(body) {
   const name = String(body?.name || '').trim().slice(0, 20);
   if (!name) throw httpError(400, 'Please enter a name for the profile.');
   const avatar = Math.min(7, Math.max(0, parseInt(body?.avatar, 10) || 0));
-  return { name, avatar, kids: Boolean(body?.kids), lang: body?.lang === 'es' ? 'es' : 'en', subLang: ['en', 'es'].includes(body?.subLang) ? body.subLang : 'off', uiLang: body?.uiLang === 'es' ? 'es' : 'en' };
+  const kids = Boolean(body?.kids);
+  return { name, avatar, kids, maxAge: maxAgeValue(body?.maxAge, kids), lang: body?.lang === 'es' ? 'es' : 'en', subLang: ['en', 'es'].includes(body?.subLang) ? body.subLang : 'off', uiLang: body?.uiLang === 'es' ? 'es' : 'en' };
 }
 
 app.get('/api/profiles', (req, res) => {
-  res.json({ profiles: ensureDefaultProfile(req.user) });
+  const profiles = ensureDefaultProfile(req.user);
+  const minAge = Math.min(...profiles.map(p=>p.maxAge));
+  res.json({ profiles: profiles.map(p=>({...p,requiresPassword: !p.hasPin && p.maxAge > minAge})) });
 });
 
+function requireAccountPassword(req) {
+  const user = getUserByUsername(req.user.username);
+  if (!user || !verifyPassword(String(req.body?.accountPassword || ''), user.password_hash)) {
+    throw httpError(403, 'Confirm your account password to change parental controls.');
+  }
+}
+
 app.post('/api/profiles', (req, res) => {
-  res.json({ profile: createProfile(req.user.id, cleanProfileInput(req.body)) });
+  const input = cleanProfileInput(req.body);
+  // Otherwise a child could create an unrestricted profile with only a session cookie.
+  if (!input.kids || input.maxAge > 10) requireAccountPassword(req);
+  const profile = createProfile(req.user.id, input);
+  res.status(201).json({ profile });
 });
 
 app.put('/api/profiles/:id', (req, res) => {
   const id = Number(req.params.id);
   const current = getProfile(req.user.id, id);
   if (!current) throw httpError(404, 'Profile not found.');
-  res.json({ profile: updateProfile(req.user.id, id, cleanProfileInput({ ...current, ...(req.body || {}) })) });
+  const input = cleanProfileInput({ ...current, ...(req.body || {}) });
+  const pinChange = Object.prototype.hasOwnProperty.call(req.body || {}, 'newPin');
+  const needsPassword = pinChange || (current.kids && !input.kids) || input.maxAge > current.maxAge;
+  if (needsPassword) requireAccountPassword(req);
+  if (pinChange) {
+    const pin = String(req.body.newPin || '');
+    if (pin && !/^\d{4,8}$/.test(pin)) throw httpError(400, 'PIN must contain 4–8 digits.');
+    setProfilePin(req.user.id, id, pin ? hashPassword(pin) : null);
+    clearActiveProfile(res);
+  }
+  res.json({ profile: updateProfile(req.user.id, id, input) });
 });
 
 app.delete('/api/profiles/:id', (req, res) => {
   const id = Number(req.params.id);
   if (!getProfile(req.user.id, id)) throw httpError(404, 'Profile not found.');
   if (listProfiles(req.user.id).length <= 1) throw httpError(400, 'You need at least one profile.');
+  requireAccountPassword(req);
   deleteProfile(req.user.id, id);
+  clearActiveProfile(res);
   res.json({ ok: true });
 });
+
+// Only the account owner can issue an active-profile cookie. A protected profile
+// also requires its PIN, rate-limited independently of account login.
+const pinAttempts = new Map();
+app.post('/api/profiles/:id/activate', (req, res) => {
+  const id = Number(req.params.id);
+  const profile = getProfile(req.user.id, id);
+  if (!profile) throw httpError(404, 'Profile not found.');
+  const sec = profileSecurity(req.user.id, id);
+  if (!sec.pinHash) {
+    const profiles=listProfiles(req.user.id);
+    const minAge=Math.min(...profiles.map(p=>p.maxAge));
+    if (profile.maxAge > minAge) requireAccountPassword(req);
+  }
+  if (sec.pinHash) {
+    const key = `${req.user.id}:${id}:${clientIp(req)}`;
+    const now = Date.now();
+    const misses = (pinAttempts.get(key) || []).filter(t => now - t < 5 * 60 * 1000);
+    if (misses.length >= 5) return res.status(429).json({error:'Too many PIN attempts. Try again in five minutes.'});
+    if (!verifyPassword(String(req.body?.pin || ''), sec.pinHash)) {
+      misses.push(now); pinAttempts.set(key, misses);
+      return res.status(403).json({error:'Incorrect profile PIN.', code:'PIN'});
+    }
+    pinAttempts.delete(key);
+  }
+  issueActiveProfile(res, req.user, profile, sec.pinVersion);
+  res.json({profile});
+});
+app.post('/api/profiles/deactivate', (req, res) => {
+  clearActiveProfile(res);
+  res.json({ok:true});
+});
+
+// A restricted profile can play only sources returned by an approved title
+// search, and only torrent hashes resulting from those source grants.
+const grantedLinks = new Map();
+const grantedHashes = new Map();
+const GRANT_TTL = 2 * 60 * 60 * 1000;
+const grantKey = (u,p) => `${u}:${p}`;
+function grantLink(u,p,link) {
+  const key = grantKey(u,p);
+  const map = grantedLinks.get(key) || new Map();
+  map.set(String(link), Date.now() + GRANT_TTL);
+  if (map.size > 150) map.delete(map.keys().next().value);
+  grantedLinks.set(key,map);
+}
+function grantHash(u,p,hash) {
+  const key = grantKey(u,p);
+  const map = grantedHashes.get(key) || new Map();
+  map.set(String(hash).toLowerCase(),Date.now()+GRANT_TTL);
+  if (map.size > 100) map.delete(map.keys().next().value);
+  grantedHashes.set(key,map);
+}
+function isGranted(map,u,p,value) {
+  const expiry = map.get(grantKey(u,p))?.get(String(value));
+  return Number(expiry) > Date.now();
+}
+const isGrantedLink = (u,p,link) => isGranted(grantedLinks,u,p,link);
+const isGrantedHash = (u,p,hash) => isGranted(grantedHashes,u,p,String(hash).toLowerCase());
+
+function activeProfile(req) {
+  const id = getActiveProfileId(req, req.user);
+  return id ? getProfile(req.user.id, id) : null;
+}
+function withActiveProfile(req,res,next) {
+  const p = activeProfile(req);
+  if (!p) return res.status(403).json({error:'Unlock a profile first.', code:'PROFILE_LOCKED'});
+  req.profile = p;
+  next();
+}
+function requireGrantedFile(req,res,next) {
+  if (req.profile.maxAge >= 18) return next();
+  const hash = String(req.query.hash || req.params.hash || '').toLowerCase();
+  if (!isGrantedHash(req.user.id, req.profile.id, hash)) return res.status(403).json({error:'This title is not permitted for this profile.'});
+  next();
+}
 
 // Routes below act on behalf of one profile, sent as X-Profile-Id (or in the body for beacons).
 function withProfile(req, res, next) {
   const raw = req.get('x-profile-id') || req.body?.profileId || req.query.profileId;
   const profile = raw ? getProfile(req.user.id, Number(raw)) : null;
   if (!profile) return res.status(400).json({ error: 'Choose a profile first.', code: 'PROFILE' });
+  if (getActiveProfileId(req,req.user) !== profile.id) {
+    return res.status(403).json({error:'Unlock this profile before continuing.',code:'PROFILE_LOCKED'});
+  }
   req.profile = profile;
   next();
+}
+
+async function enforceTitleRating(profile,type,id) {
+  if (profile.maxAge >= 18) return null;
+  if (!tmdbEnabled() || !validType(type) || !Number.isSafeInteger(Number(id)) || Number(id) <= 0) {
+    throw httpError(403, 'Only rated catalog titles are available to restricted profiles.');
+  }
+  const title = await getTitle(type,Number(id));
+  if (!allowedByRating(title.certification,profile.maxAge)) throw httpError(403, 'This title exceeds the profile age rating.');
+  return title;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +358,7 @@ const validType = (t) => (t === 'movie' || t === 'tv' ? t : null);
 app.get('/api/browse/:page', withProfile, wrap(async (req, res) => {
   if (!tmdbEnabled()) return res.json({ configured: false });
   const page = BROWSE_PAGES.includes(req.params.page) ? req.params.page : 'home';
-  const data = await getBrowse(page, { kids: req.profile.kids });
+  const data = await getBrowse(page, { kids: req.profile.kids, maxAge: req.profile.maxAge });
   res.json({ configured: true, ...data });
 }));
 
@@ -233,14 +366,22 @@ app.get('/api/search', withProfile, wrap(async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!tmdbEnabled()) return res.json({ configured: false, results: [] });
   if (q.length < 2) return res.json({ configured: true, results: [] });
-  res.json({ configured: true, results: await searchTitles(q, { kids: req.profile.kids }) });
+  const all = await searchTitles(q, {kids: req.profile.kids});
+  // Filter candidates by certified rating, not just a genre label.
+  const candidates = req.profile.maxAge < 18 ? all.slice(0,20) : all;
+  const checked = await Promise.all(candidates.map(async item => {
+    try { await enforceTitleRating(req.profile,item.type,item.id); return item; } catch { return null; }
+  }));
+  res.json({configured:true,results:checked.filter(Boolean)});
 }));
 
-app.get('/api/title/tv/:id/season/:n', requireTmdb, wrap(async (req, res) => {
+app.get('/api/title/tv/:id/season/:n', requireTmdb, withProfile, wrap(async (req, res) => {
+  await enforceTitleRating(req.profile,'tv',req.params.id);
   res.json(await getSeason(Number(req.params.id), Number(req.params.n)));
 }));
 
-app.get('/api/title/tv/:id/next', requireTmdb, wrap(async (req, res) => {
+app.get('/api/title/tv/:id/next', requireTmdb, withProfile, wrap(async (req, res) => {
+  await enforceTitleRating(req.profile,'tv',req.params.id);
   const next = await getNextEpisode(Number(req.params.id), Number(req.query.season), Number(req.query.episode));
   res.json({ next });
 }));
@@ -250,6 +391,7 @@ app.get('/api/title/:type/:id/target', requireTmdb, withProfile, wrap(async (req
   const type = validType(req.params.type);
   if (!type) throw httpError(404, 'Unknown type');
   const id = Number(req.params.id);
+  await enforceTitleRating(req.profile,type,id);
   const rows = getTitleProgress(req.profile.id, type, id);
   const latest = rows[0];
 
@@ -283,11 +425,36 @@ app.get('/api/title/:type/:id/target', requireTmdb, withProfile, wrap(async (req
   res.json({ type, season, episode, name, resume, positionSeconds, durationSeconds });
 }));
 
-app.get('/api/title/:type/:id', requireTmdb, wrap(async (req, res) => {
+app.get('/api/title/:type/:id', requireTmdb, withProfile, wrap(async (req, res) => {
   const type = validType(req.params.type);
   if (!type) throw httpError(404, 'Unknown type');
+  await enforceTitleRating(req.profile,type,req.params.id);
   res.json(await getTitle(type, Number(req.params.id)));
 }));
+
+// User-driven discovery and viewing-history recommendations; no extra service.
+app.get('/api/discover',requireTmdb,withProfile,wrap(async(req,res)=>{
+  const filters = cleanDiscoverFilters(req.query);
+  const items = await getDiscover(filters);
+  const limited = req.profile.maxAge < 18 ? items.slice(0,20) : items;
+  const checked = await Promise.all(limited.map(async item => {
+    try { await enforceTitleRating(req.profile,item.type,item.id); return item; } catch { return null; }
+  }));
+  res.json({items:checked.filter(Boolean),filters});
+}));
+app.get('/api/recommendations',requireTmdb,withProfile,wrap(async(req,res)=>{
+  const recent = getRecentProgress(req.profile.id,20).filter(x => x.tmdbId && validType(x.mediaType));
+  const saved = getMyList(req.profile.id).filter(x => x.id);
+  const seen = new Set();
+  const seed = [...recent.map(x=>({type:x.mediaType,id:x.tmdbId})),...saved]
+    .filter(x=>{const k=`${x.type}:${x.id}`;if(seen.has(k))return false;seen.add(k);return true;}).slice(0,8);
+  const found = await getRecommendations(seed);
+  const checked = await Promise.all(found.items.slice(0,16).map(async item=>{
+    try {await enforceTitleRating(req.profile,item.type,item.id);return item;}catch{return null;}
+  }));
+  res.json({items:checked.filter(Boolean),genre:found.genre});
+}));
+
 
 // ---------------------------------------------------------------------------
 // Sources (Prowlarr)
@@ -297,6 +464,14 @@ app.get('/api/sources', withProfile, wrap(async (req, res) => {
   const { type, title, year, q } = req.query;
   if (!q && !title) throw httpError(400, 'Missing title');
   if (req.profile.kids && !title) throw httpError(403, 'Direct indexer search is turned off for Kids profiles.');
+  let approvedTitle = null;
+  if (req.profile.maxAge < 18) {
+    const tmdbId = Number(req.query.tmdbId);
+    if (!validType(type) || !Number.isSafeInteger(tmdbId) || tmdbId < 1 || q) {
+      throw httpError(403,'Direct source searches are disabled for age-restricted profiles.');
+    }
+    approvedTitle = await enforceTitleRating(req.profile,type,tmdbId);
+  }
   // Spanish releases carry the Spanish title, so look that up when the profile prefers Spanish.
   let altTitles = [];
   const tmdbId = parseInt(req.query.tmdbId, 10);
@@ -314,12 +489,13 @@ app.get('/api/sources', withProfile, wrap(async (req, res) => {
     lang: req.profile.lang,
     altTitles,
     type: validType(type),
-    title: title ? String(title) : undefined,
+    title: approvedTitle?.title || (title ? String(title) : undefined),
     year: year ? String(year) : undefined,
     season: req.query.season !== undefined ? Number(req.query.season) : undefined,
     episode: req.query.episode !== undefined ? Number(req.query.episode) : undefined,
     q: q ? String(q) : undefined,
   });
+  if (req.profile.maxAge < 18) for (const result of results) if (result.link) grantLink(req.user.id,req.profile.id,result.link);
   res.json({ results, skipped, lang: req.profile.lang, altTitles });
 }));
 
@@ -457,6 +633,9 @@ function pickFile(fileStats, season, episode) {
 app.post('/api/stream', withProfile, wrap(async (req, res) => {
   const { link, season, episode, contentKey } = req.body || {};
   if (!link) throw httpError(400, 'Missing source link.');
+  if (req.profile.maxAge < 18 && !isGrantedLink(req.user.id,req.profile.id,link)) {
+    throw httpError(403,'This source was not approved for this restricted profile. Search the title first.');
+  }
 
   const resolved = await addToTorrServer(await resolveLink(link));
   const hash = resolved.hash;
@@ -466,6 +645,8 @@ app.post('/api/stream', withProfile, wrap(async (req, res) => {
   const info = resolved.file_stats?.length ? resolved : await waitForFiles(hash);
   const file = pickFile(info.file_stats, season ?? null, episode ?? null);
   if (!file) throw httpError(404, 'No playable video file was found in this torrent.');
+  // Grant access only after finding a playable file for this approved title.
+  if (req.profile.maxAge < 18) grantHash(req.user.id,req.profile.id,hash);
 
   const baseName = (file.path.split('/').pop() || 'video').trim() || 'video';
   const originalMagnet = /^magnet:/i.test(String(link)) ? String(link) : null;
@@ -484,7 +665,7 @@ app.post('/api/stream', withProfile, wrap(async (req, res) => {
   });
 }));
 
-app.get('/api/stats/:hash', wrap(async (req, res) => {
+app.get('/api/stats/:hash', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const hash = String(req.params.hash);
   touch(hash);
   const t = await tsPost('/torrents', { action: 'get', hash }).catch(() => ({}));
@@ -500,13 +681,13 @@ app.get('/api/stats/:hash', wrap(async (req, res) => {
 // Sidecar SRT and VTT subtitles found beside the selected video in TorrServer.
 // No third-party subtitle service or API key is needed. Subtitles never modify
 // the main video stream and no file is stored in SQLite.
-app.get('/api/subtitles', wrap(async (req, res) => {
+app.get('/api/subtitles', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const { hash, index } = validatedFileRef(req.query.hash, req.query.index);
   const info = await tsPost('/torrents', { action: 'get', hash }, 8000);
   res.json({ subtitles: listSubtitleFiles(info.file_stats, index) });
 }));
 
-app.get('/api/subtitles/file', wrap(async (req, res) => {
+app.get('/api/subtitles/file', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const { hash, index } = validatedFileRef(req.query.hash, req.query.index);
   const videoIndex = Number(req.query.videoIndex);
   if (!Number.isSafeInteger(videoIndex) || videoIndex < 1) throw httpError(400, 'Invalid video index.');
@@ -524,6 +705,17 @@ app.get('/api/subtitles/file', wrap(async (req, res) => {
   if (bytes.byteLength > 5 * 1024 * 1024) throw httpError(413, 'Subtitle file too large.');
   res.set({ 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
   res.send(toVtt(new TextDecoder('utf-8').decode(bytes)));
+}));
+
+// Low-resolution thumbnail previews are only generated while requested; at most
+// one ffmpeg process runs, with short deadlines and a small disk cache.
+app.get('/api/preview',withActiveProfile,requireGrantedFile,wrap(async(req,res)=>{
+  const {hash,index}=validatedFileRef(req.query.hash,req.query.index);
+  const at=Number(req.query.at);
+  if (!Number.isFinite(at) || at<0 || at>12*3600) throw httpError(400,'Invalid preview position.');
+  const bytes=await thumbnailFor(hash,index,at,torrentFileUrl(hash,index));
+  res.set({'Content-Type':'image/jpeg','Cache-Control':'private, max-age=3600','X-Content-Type-Options':'nosniff'});
+  res.send(bytes);
 }));
 
 // ---------------------------------------------------------------------------
@@ -615,7 +807,7 @@ function summarizeProbe(info) {
   };
 }
 
-app.get('/api/audiofix/probe', wrap(async (req, res) => {
+app.get('/api/audiofix/probe', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const { hash, index } = fileRef(req);
   touch(hash);
   const key = `${hash}:${index}`;
@@ -628,7 +820,7 @@ app.get('/api/audiofix/probe', wrap(async (req, res) => {
   res.json(hit.data);
 }));
 
-app.get('/api/audiofix/stream', wrap(async (req, res) => {
+app.get('/api/audiofix/stream', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const { hash, index } = fileRef(req);
   const start = Math.min(Math.max(parseFloat(req.query.t) || 0, 0), 172800);
   const track = Math.min(Math.max(parseInt(req.query.a, 10) || 0, 0), 31);
@@ -704,7 +896,7 @@ app.get('/api/audiofix/stream', wrap(async (req, res) => {
 // lets browsers resume an interrupted download.
 // ---------------------------------------------------------------------------
 
-app.get('/api/download', wrap(async (req, res) => {
+app.get('/api/download', withActiveProfile, requireGrantedFile, wrap(async (req, res) => {
   const { hash, index } = fileRef(req);
   const rawName = String(req.query.name || 'video.mkv').split(/[\\/]/).pop().trim();
   const name = rawName.replace(/[\u0000-\u001f"]/g, '').slice(0, 200) || 'video.mkv';
@@ -755,9 +947,10 @@ setInterval(async () => {
 // Watch progress / Continue Watching
 // ---------------------------------------------------------------------------
 
-app.post('/api/progress', withProfile, (req, res) => {
+app.post('/api/progress', withProfile, wrap(async (req, res) => {
   const b = req.body || {};
   if (!b.contentKey || !b.title || !b.mediaType) throw httpError(400, 'Missing progress fields.');
+  if (req.profile.maxAge < 18) await enforceTitleRating(req.profile,b.mediaType,b.tmdbId);
   upsertProgress({
     profileId: req.profile.id,
     contentKey: String(b.contentKey),
@@ -778,6 +971,16 @@ app.post('/api/progress', withProfile, (req, res) => {
   });
   if (b.hash) touch(String(b.hash));
   res.json({ saved: true });
+}));
+
+app.get('/api/skip-markers',withProfile,(req,res)=>{
+  const key=safeContentKey(req.query.contentKey);
+  res.json({markers:getSkipMarkers(req.profile.id,key)});
+});
+app.put('/api/skip-markers',withProfile,(req,res)=>{
+  const key=safeContentKey(req.body?.contentKey);
+  const value=cleanMarkers(req.body?.markers);
+  res.json({markers:putSkipMarkers(req.profile.id,key,value)});
 });
 
 app.get('/api/progress/get', withProfile, (req, res) => {
@@ -790,9 +993,10 @@ app.get('/api/progress/get', withProfile, (req, res) => {
   });
 });
 
-app.get('/api/progress/title', withProfile, (req, res) => {
+app.get('/api/progress/title', withProfile, wrap(async (req, res) => {
   const type = validType(req.query.type);
   if (!type) throw httpError(400, 'Unknown type');
+  await enforceTitleRating(req.profile,type,req.query.id);
   const items = getTitleProgress(req.profile.id, type, Number(req.query.id)).map((r) => ({
     season: r.season,
     episode: r.episode,
@@ -801,7 +1005,7 @@ app.get('/api/progress/title', withProfile, (req, res) => {
     completed: Boolean(r.completed),
   }));
   res.json({ items });
-});
+}));
 
 function historyItem(r, extra = {}) {
   return {
@@ -825,7 +1029,13 @@ function historyItem(r, extra = {}) {
 }
 
 app.get('/api/history', withProfile, wrap(async (req, res) => {
-  const rows = getRecentProgress(req.profile.id);
+  let rows = getRecentProgress(req.profile.id);
+  if(req.profile.maxAge<18){
+    const limited=await Promise.all(rows.slice(0,40).map(async row=>{
+      try {await enforceTitleRating(req.profile,row.mediaType,row.tmdbId);return row;}catch{return null;}
+    }));
+    rows=limited.filter(Boolean);
+  }
   const seen = new Set();
   const tasks = [];
 
@@ -872,14 +1082,22 @@ app.get('/api/history', withProfile, wrap(async (req, res) => {
 // My List
 // ---------------------------------------------------------------------------
 
-app.get('/api/mylist', withProfile, (req, res) => res.json({ items: getMyList(req.profile.id) }));
+app.get('/api/mylist', withProfile, wrap(async(req,res)=>{
+  let items=getMyList(req.profile.id);
+  if(req.profile.maxAge<18){
+    const checked=await Promise.all(items.slice(0,50).map(async item=>{try{await enforceTitleRating(req.profile,item.type,item.id);return item;}catch{return null;}}));
+    items=checked.filter(Boolean);
+  }
+  res.json({items});
+}));
 
-app.post('/api/mylist', withProfile, (req, res) => {
+app.post('/api/mylist', withProfile, wrap(async (req, res) => {
   const { type, id, title } = req.body || {};
   if (!validType(type) || !id || !title) throw httpError(400, 'Missing title details.');
+  await enforceTitleRating(req.profile,type,id);
   addToMyList(req.profile.id, { ...req.body, id: Number(id) });
   res.json({ ok: true });
-});
+}));
 
 app.delete('/api/mylist/:type/:id', withProfile, (req, res) => {
   removeFromMyList(req.profile.id, req.params.type, Number(req.params.id));

@@ -1,4 +1,5 @@
 import { cacheGet, cacheSet } from './db.js';
+import { allowedByRating, selectFavoriteGenre } from './premium.js';
 
 const KEY = process.env.TMDB_API_KEY || '';
 const LANG = process.env.TMDB_LANGUAGE || 'en-US';
@@ -316,10 +317,27 @@ async function fetchRow([title, def]) {
   return { id: `${def.path}:${title}`, title, items };
 }
 
-export async function getBrowse(page, { kids = false } = {}) {
+export async function getBrowse(page, { kids = false, maxAge = 18 } = {}) {
   const defs = kids ? KIDS_PAGE : PAGES[page] || PAGES.home;
   const settled = await Promise.allSettled(defs.map(fetchRow));
-  const rows = settled.filter((s) => s.status === 'fulfilled' && s.value.items.length).map((s) => s.value);
+  let rows = settled.filter((s) => s.status === 'fulfilled' && s.value.items.length).map((s) => s.value);
+  if (maxAge < 18) {
+    // TMDB genre labels alone are not age ratings. Confirm certification before
+    // sending a card or billboard to a restricted profile. Work in a bounded
+    // pool to avoid saturating TMDB on a cold cache.
+    const jobs = rows.flatMap((row,r)=>row.items.slice(0,12).map(item=>({r,item})));
+    const allowed=Array.from({length:rows.length},()=>[]);
+    let next=0;
+    await Promise.all(Array.from({length:6},async()=>{
+      while(next<jobs.length){
+        const job=jobs[next++];
+        try { const detail=await getTitle(job.item.type,job.item.id);
+          if(allowedByRating(detail.certification,maxAge)) allowed[job.r].push(job.item);
+        } catch { /* Fail closed when certification cannot be verified. */ }
+      }
+    }));
+    rows=rows.map((row,i)=>({...row,items:allowed[i]})).filter(row=>row.items.length);
+  }
 
   if (!rows.length) {
     const firstError = settled.find((s) => s.status === 'rejected');
@@ -353,4 +371,36 @@ export async function getBrowse(page, { kids = false } = {}) {
   }
 
   return { rows, billboard };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 discovery and history-driven suggestions (same TMDB key and cache)
+// ---------------------------------------------------------------------------
+export async function getDiscover(filters) {
+  const {type,genre,year,minRating,sort} = filters;
+  const params = {
+    sort_by:type==='tv'&&sort==='primary_release_date.desc'?'first_air_date.desc':sort, include_adult:'false', 'vote_count.gte':minRating>0?150:30,
+    'vote_average.gte':minRating || undefined,
+    with_genres:genre || undefined,
+    ...(year ? (type==='movie'?{'primary_release_year':year}:{first_air_date_year:year}) : {}),
+  };
+  const cacheKey = `phase2:discover:${type}:${JSON.stringify(params)}`;
+  return cached(cacheKey,4*3600,async()=>{
+    const data=await tmdbFetch(`/discover/${type}`,params);
+    return toRowItems(data.results,type);
+  });
+}
+
+export async function getRecommendations(seeds) {
+  const details=await Promise.all(seeds.slice(0,8).map(async item=>{
+    if(!['movie','tv'].includes(item.type)||!Number(item.id))return null;
+    try {return await getTitle(item.type,item.id);} catch {return null;}
+  }));
+  const actual=details.filter(Boolean);
+  const genre=selectFavoriteGenre(actual);
+  if(!genre)return {items:[],genre:null};
+  const favoredType=actual.filter(i=>i.type==='tv').length>actual.filter(i=>i.type==='movie').length?'tv':'movie';
+  const candidates=await getDiscover({type:favoredType,genre:String(genre),sort:'popularity.desc',minRating:0,year:null});
+  const watched=new Set(seeds.map(i=>`${i.type}:${i.id}`));
+  return {items:candidates.filter(i=>!watched.has(`${i.type}:${i.id}`)),genre};
 }

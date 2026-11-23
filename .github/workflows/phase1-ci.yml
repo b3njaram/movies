@@ -1,7 +1,7 @@
 name: StreamHub checks
 on:
   push:
-    branches: [main, 'phase1-*']
+    branches: [main, 'phase1-*', 'phase2-*']
   pull_request:
     branches: [main]
 jobs:
@@ -21,6 +21,9 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Validate backend JavaScript
         run: |
+          node --check backend/premium.js
+          node --check backend/preview.js
+          node --check backend/tmdb.js
           node --check backend/server.js
           node --check backend/db.js
           node --check backend/admin.js

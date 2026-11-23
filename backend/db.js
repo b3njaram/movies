@@ -104,6 +104,10 @@ for (const ddl of [
   "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE profiles ADD COLUMN pin_hash TEXT",
+  "ALTER TABLE profiles ADD COLUMN pin_version INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE profiles ADD COLUMN max_age INTEGER",
+
 ]) {
   try { db.exec(ddl); } catch (e) {
     if (!/duplicate column name/i.test(e.message)) throw e;
@@ -115,6 +119,19 @@ if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1').get()) {
   const owner = db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get();
   if (owner) db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(owner.id);
 }
+
+// Existing Kids profiles retain family-friendly defaults; regular profiles remain unrestricted.
+db.exec('UPDATE profiles SET max_age = CASE WHEN kids = 1 THEN 10 ELSE 18 END WHERE max_age IS NULL');
+db.exec(`CREATE TABLE IF NOT EXISTS skip_markers (
+  profile_id INTEGER NOT NULL,
+  content_key TEXT NOT NULL,
+  intro_start INTEGER,
+  intro_end INTEGER,
+  credits_start INTEGER,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (profile_id, content_key),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+)`);
 
 // ---------------------------------------------------------------------------
 // Users
@@ -134,16 +151,16 @@ export function createUser(username, passwordHash) {
 
 export function listProfiles(userId) {
   return db
-    .prepare('SELECT id, name, avatar, kids, lang, sub_lang AS subLang, ui_lang AS uiLang FROM profiles WHERE user_id = ? ORDER BY id')
+    .prepare('SELECT id, name, avatar, kids, lang, sub_lang AS subLang, ui_lang AS uiLang, max_age AS maxAge, (pin_hash IS NOT NULL) AS hasPin FROM profiles WHERE user_id = ? ORDER BY id')
     .all(userId)
-    .map((p) => ({ ...p, kids: !!p.kids }));
+    .map((p) => ({ ...p, kids: !!p.kids, hasPin: !!p.hasPin }));
 }
 
 export function getProfile(userId, profileId) {
   const p = db
-    .prepare('SELECT id, name, avatar, kids, lang, sub_lang AS subLang, ui_lang AS uiLang FROM profiles WHERE id = ? AND user_id = ?')
+    .prepare('SELECT id, name, avatar, kids, lang, sub_lang AS subLang, ui_lang AS uiLang, max_age AS maxAge, (pin_hash IS NOT NULL) AS hasPin FROM profiles WHERE id = ? AND user_id = ?')
     .get(profileId, userId);
-  return p ? { ...p, kids: !!p.kids } : null;
+  return p ? { ...p, kids: !!p.kids, hasPin: !!p.hasPin } : null;
 }
 
 // Every account always has at least one profile. The first time an account is
@@ -169,21 +186,22 @@ export function ensureDefaultProfile(user) {
   return listProfiles(user.id);
 }
 
-export function createProfile(userId, { name, avatar, kids, lang, subLang, uiLang }) {
+export function createProfile(userId, { name, avatar, kids, lang, subLang, uiLang, maxAge }) {
   const info = db
-    .prepare('INSERT INTO profiles (user_id, name, avatar, kids, lang, sub_lang, ui_lang) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(userId, name, avatar, kids ? 1 : 0, lang === 'es' ? 'es' : 'en', ['en','es'].includes(subLang) ? subLang : 'off', uiLang === 'es' ? 'es' : 'en');
+    .prepare('INSERT INTO profiles (user_id, name, avatar, kids, lang, sub_lang, ui_lang, max_age) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(userId, name, avatar, kids ? 1 : 0, lang === 'es' ? 'es' : 'en', ['en','es'].includes(subLang) ? subLang : 'off', uiLang === 'es' ? 'es' : 'en', maxAge);
   return getProfile(userId, Number(info.lastInsertRowid));
 }
 
-export function updateProfile(userId, profileId, { name, avatar, kids, lang, subLang, uiLang }) {
-  db.prepare('UPDATE profiles SET name = ?, avatar = ?, kids = ?, lang = ?, sub_lang = ?, ui_lang = ? WHERE id = ? AND user_id = ?').run(
+export function updateProfile(userId, profileId, { name, avatar, kids, lang, subLang, uiLang, maxAge }) {
+  db.prepare('UPDATE profiles SET name = ?, avatar = ?, kids = ?, lang = ?, sub_lang = ?, ui_lang = ?, max_age = ? WHERE id = ? AND user_id = ?').run(
     name,
     avatar,
     kids ? 1 : 0,
     lang === 'es' ? 'es' : 'en',
     ['en', 'es'].includes(subLang) ? subLang : 'off',
     uiLang === 'es' ? 'es' : 'en',
+    maxAge,
     profileId,
     userId
   );
@@ -192,6 +210,24 @@ export function updateProfile(userId, profileId, { name, avatar, kids, lang, sub
 
 export function deleteProfile(userId, profileId) {
   return db.prepare('DELETE FROM profiles WHERE id = ? AND user_id = ?').run(profileId, userId);
+}
+
+export function profileSecurity(userId, profileId) {
+  return db.prepare('SELECT pin_hash AS pinHash, pin_version AS pinVersion, max_age AS maxAge FROM profiles WHERE user_id = ? AND id = ?').get(userId, profileId);
+}
+export function setProfilePin(userId, profileId, hash) {
+  db.prepare('UPDATE profiles SET pin_hash = ?, pin_version = pin_version + 1 WHERE user_id = ? AND id = ?').run(hash, userId, profileId);
+}
+export function getSkipMarkers(profileId, contentKey) {
+  const m = db.prepare('SELECT intro_start AS introStart, intro_end AS introEnd, credits_start AS creditsStart FROM skip_markers WHERE profile_id = ? AND content_key = ?').get(profileId, contentKey);
+  return m || { introStart: null, introEnd: null, creditsStart: null };
+}
+export function putSkipMarkers(profileId, contentKey, m) {
+  db.prepare(`INSERT INTO skip_markers (profile_id, content_key, intro_start, intro_end, credits_start)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id, content_key) DO UPDATE SET intro_start = excluded.intro_start, intro_end = excluded.intro_end,
+    credits_start = excluded.credits_start, updated_at = datetime('now')`).run(profileId, contentKey, m.introStart, m.introEnd, m.creditsStart);
+  return getSkipMarkers(profileId, contentKey);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 # StreamHub
 
+**Phase 2:** TV remote navigation and browser-native casting, manual Skip Intro/Credits markers, on-demand timeline preview frames, per-profile recommendations and Discover filters, and PIN-protected profiles with server-enforced age limits. See [Phase 2 guide](docs/premium-experience.md).
+
 A self-hosted, Netflix-style streaming front end for **your own** Prowlarr indexers and TorrServer.
 No subscriptions, no Debrid — everything runs on your machine.
 

@@ -12,9 +12,10 @@ export const NAV = [
   ['movies', 'Movies'],
   ['new', 'New & Popular'],
   ['list', 'My List'],
+  ['discover', 'Discover'],
 ];
 
-export default function Header({ page, onNav, query, onQuery, profile, isAdmin = false, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
+export default function Header({ page, onNav, query, onQuery, profile, isAdmin = false, tvMode = false, onTvMode, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
   const { t } = useLocale();
   const { setUiLang } = useApp();
   const navItems = isAdmin ? [...NAV, ['admin', 'Admin']] : NAV;
@@ -195,6 +196,9 @@ export default function Header({ page, onNav, query, onQuery, profile, isAdmin =
                   >
                     <PencilIcon size={22} className="ml-1" />
                     {t("Manage Profiles")}
+                  </button>
+                  <button onClick={()=>{setMenu(null);onTvMode?.();}} className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-white/15" aria-pressed={tvMode}>
+                    {t('TV remote mode')}: {tvMode?t('On'):t('Off')}
                   </button>
                   <div className="my-2 border-t border-white/20" />
                   <button onClick={onLogout} className="block w-full px-4 py-2 text-center text-sm text-[#e5e5e5] hover:underline">

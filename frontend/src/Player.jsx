@@ -23,6 +23,7 @@ import { LangChip } from './SourcePicker';
 import { contentKeyOf, cx, fmtSpeed, fmtTime } from './utils';
 import { getRankedSources, rememberSuccessfulSource } from './compat';
 import { useLocale } from './locale';
+import { nearestInDirection } from './tv-spatial';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -132,6 +133,12 @@ export default function Player({ spec, onClose, onNext }) {
   const [countdown, setCountdown] = useState(null);
   const [scrub, setScrub] = useState(null);
   const [hoverPct, setHoverPct] = useState(null);
+  const [previewAt,setPreviewAt]=useState(null);
+  const [previewError,setPreviewError]=useState(false);
+  const [skipMarkers,setSkipMarkers]=useState({introStart:null,introEnd:null,creditsStart:null});
+  const [skipMenu,setSkipMenu]=useState(false);
+  const [draftIntroStart,setDraftIntroStart]=useState(null);
+  const [canCast,setCanCast]=useState(false);
 
   // audio fix
   const [fixOn, setFixOn] = useState(false);
@@ -148,7 +155,8 @@ export default function Player({ spec, onClose, onNext }) {
   const subtitleUrl = useRef(null);
 
   const contentKey = contentKeyOf(spec);
-  menuOpenRef.current = rateMenu || pickerOpen || audioMenu || subMenuOpen;
+  const supportsMarkers=/^(movie:\d+|tv:\d+:s\d+e\d+)$/.test(contentKey);
+  menuOpenRef.current = rateMenu || pickerOpen || audioMenu || subMenuOpen || skipMenu;
   forcedRef.current = forced;
 
   const markAttempt = useCallback((link, patch = {}, { fill = false } = {}) => {
@@ -177,6 +185,47 @@ export default function Player({ spec, onClose, onNext }) {
       ? `${BASE}/api/audiofix/stream?hash=${stream.hash}&index=${stream.fileIndex}&t=${Math.floor(fixOffset)}&a=${fixTrack}`
       : stream.streamUrl
     : null;
+
+  // Per-profile manual intro/credits markers. They are not inferred from film
+  // metadata, so nothing is skipped unexpectedly or across different episodes.
+  useEffect(()=>{
+    if(!supportsMarkers)return;
+    let alive=true;
+    setDraftIntroStart(null);
+    api(`/api/skip-markers?contentKey=${encodeURIComponent(contentKey)}`)
+      .then(d=>alive&&setSkipMarkers(d.markers)).catch(()=>{});
+    return()=>{alive=false;};
+  },[contentKey,supportsMarkers,profile?.id]);
+  const writeMarkers=useCallback(async values=>{
+    try {
+      const d=await api('/api/skip-markers',{method:'PUT',body:{contentKey,markers:values}});
+      setSkipMarkers(d.markers);
+      notify(t('Skip markers saved.'));
+    } catch(e){notify(e.message);}
+  },[contentKey,notify,t]);
+  useEffect(()=>{
+    const v=videoRef.current;
+    setCanCast(Boolean(v?.remote?.prompt || v?.webkitShowPlaybackTargetPicker));
+    if(v)v.setAttribute('x-webkit-airplay','allow');
+  },[videoSrc]);
+  const castToDevice=useCallback(async()=>{
+    const v=videoRef.current;
+    try {
+      if(v?.remote?.prompt)await v.remote.prompt();
+      else if(v?.webkitShowPlaybackTargetPicker)v.webkitShowPlaybackTargetPicker();
+      else notify(t('Casting is not supported by this browser.'));
+    }catch(e){notify(e?.message||t('No compatible receiver was found.'));}
+  },[notify,t]);
+  useEffect(()=>{
+    if(!('mediaSession' in navigator))return;
+    try{navigator.mediaSession.metadata=new MediaMetadata({title:spec.title||'StreamHub',artist:'StreamHub'});}catch{}
+  },[spec.title]);
+  useEffect(()=>{
+    if(hoverPct===null||!stream?.hash||!durRef.current){setPreviewAt(null);return;}
+    const at=Math.floor((hoverPct*durRef.current)/30)*30;
+    const timer=setTimeout(()=>{setPreviewError(false);setPreviewAt(at);},220);
+    return()=>clearTimeout(timer);
+  },[hoverPct,stream?.hash,duration]);
 
   // ---------------------------------------------------------------------
   // Progress reporting
@@ -739,6 +788,24 @@ export default function Player({ spec, onClose, onNext }) {
 
   useEffect(() => {
     const onKey = (e) => {
+      const tvMode=Boolean(document.querySelector('.tv-mode'));
+      if(e.target?.matches?.('input,textarea,select'))return;
+      if(tvMode && e.key.startsWith('Arrow')){
+        const root=wrapRef.current;
+        const candidates=[...(root?.querySelectorAll('button:not([disabled])')||[])].filter(el=>{
+          const r=el.getBoundingClientRect();return r.width>1&&r.height>1&&getComputedStyle(el).opacity!=='0';
+        });
+        const active=document.activeElement;
+        if(!root?.contains(active) || !candidates.includes(active)){
+          if(e.key==='ArrowDown' && candidates.length){e.preventDefault();poke();(candidates.find(el=>el.getAttribute('aria-label')==='Pause') || candidates.at(-1))?.focus();return;}
+        }else{
+          const dir={ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down'}[e.key];
+          const others=candidates.filter(el=>el!==active);
+          const next=nearestInDirection(active.getBoundingClientRect(),others.map(el=>el.getBoundingClientRect()),dir);
+          if(next>=0){e.preventDefault();poke();others[next].focus();return;}
+        }
+      }
+      if(tvMode && (e.key==='Enter' || e.key==='OK') && !e.target?.closest?.('button,[role="button"]')){e.preventDefault();toggle();return;}
       if (pickerOpen && e.key === 'Escape') {
         setPickerOpen(false);
         return;
@@ -771,8 +838,12 @@ export default function Player({ spec, onClose, onNext }) {
         case 'f':
           toggleFs();
           break;
+        case 'Backspace':
+        case 'BrowserBack':
+          finish();break;
         case 'Escape':
-          if (audioMenu) setAudioMenu(false);
+          if (skipMenu) setSkipMenu(false);
+          else if (audioMenu) setAudioMenu(false);
           else if (!document.fullscreenElement) finish();
           break;
         default:
@@ -782,7 +853,7 @@ export default function Player({ spec, onClose, onNext }) {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [pickerOpen, audioMenu, toggle, seekBy, applyVolume, volume, toggleMute, toggleFs, finish, poke]);
+  }, [pickerOpen, audioMenu, skipMenu, toggle, seekBy, applyVolume, volume, toggleMute, toggleFs, finish, poke]);
 
   // ---------------------------------------------------------------------
   // <video> events
@@ -934,7 +1005,7 @@ export default function Player({ spec, onClose, onNext }) {
   return (
     <div
       ref={wrapRef}
-      className="fixed inset-0 z-[200] select-none overflow-hidden bg-black text-white"
+      className="sh-player fixed inset-0 z-[200] select-none overflow-hidden bg-black text-white"
       style={{ cursor: hideCursor ? 'none' : 'default' }}
     >
       {videoSrc && phase === 'ready' && (
@@ -944,6 +1015,7 @@ export default function Player({ spec, onClose, onNext }) {
           src={videoSrc}
           autoPlay
           playsInline
+          disablePictureInPicture={false}
           className="absolute inset-0 h-full w-full bg-black object-contain"
           onClick={() => (showControls ? toggle() : poke())}
           onDoubleClick={toggleFs}
@@ -1167,6 +1239,14 @@ export default function Player({ spec, onClose, onNext }) {
         </div>
       )}
 
+      {/* User-saved intro/credits markers (one movie or episode, per profile). */}
+      {phase==='ready' && !pickerOpen && skipMarkers.introStart!==null && time>=skipMarkers.introStart-2 && time<skipMarkers.introEnd && (
+        <button onClick={()=>seekTo(skipMarkers.introEnd)} className="absolute bottom-32 right-[4%] z-30 rounded border border-white/60 bg-black/80 px-5 py-3 font-semibold backdrop-blur hover:bg-white hover:text-black">{t('Skip Intro')} ›</button>
+      )}
+      {phase==='ready' && !pickerOpen && skipMarkers.creditsStart!==null && time>=skipMarkers.creditsStart && (
+        <button onClick={()=>nextEp?goNext():seekTo(Math.max(0,safeDuration-1))} className="absolute bottom-32 right-[4%] z-30 rounded border border-white/60 bg-black/80 px-5 py-3 font-semibold backdrop-blur hover:bg-white hover:text-black">{t('Skip Credits')} ›</button>
+      )}
+
       {/* bottom controls */}
       {phase === 'ready' && (
         <div
@@ -1202,6 +1282,10 @@ export default function Player({ spec, onClose, onNext }) {
                   style={{ left: `${hoverPct * 100}%` }}
                 >
                   {fmtTime(hoverPct * safeDuration)}
+                  {previewAt !== null && !previewError && stream?.hash && <img alt={t('Scene preview')} loading="lazy" draggable={false}
+                     src={`${BASE}/api/preview?hash=${encodeURIComponent(stream.hash)}&index=${stream.fileIndex}&at=${previewAt}`}
+                     onError={()=>setPreviewError(true)}
+                     className="absolute bottom-full left-1/2 mb-1 h-auto w-36 max-w-[35vw] -translate-x-1/2 rounded border border-white/30 bg-black object-contain shadow-xl sm:w-48" />}
                 </div>
               )}
             </div>
@@ -1286,6 +1370,17 @@ export default function Player({ spec, onClose, onNext }) {
               )}
             </div>
 
+            {supportsMarkers && <div className="relative">
+              <button onClick={()=>setSkipMenu(v=>!v)} className="rounded border border-white/40 px-2 py-1 text-xs hover:bg-white/15" aria-label={t('Edit skip markers')}>⏭ <span className="hidden sm:inline">{t('Skip markers')}</span></button>
+              {skipMenu && <div className="absolute bottom-14 right-0 z-40 w-60 rounded border border-white/20 bg-[#101010] p-3 text-sm shadow-xl">
+                <p className="mb-2 font-semibold">{t('Mark intro and credits')}</p>
+                <button className="block w-full rounded px-2 py-2 text-left hover:bg-white/15" onClick={()=>{setDraftIntroStart(Math.floor(time));notify(t('Intro start noted. Mark the end next.'));}}>{t('Mark intro start')} ({fmtTime(time)})</button>
+                <button disabled={draftIntroStart===null||time<=draftIntroStart} className="block w-full rounded px-2 py-2 text-left hover:bg-white/15 disabled:opacity-40" onClick={()=>{writeMarkers({...skipMarkers,introStart:draftIntroStart,introEnd:Math.floor(time)});setDraftIntroStart(null);setSkipMenu(false);}}>{t('Mark intro end')} ({fmtTime(time)})</button>
+                <button className="block w-full rounded px-2 py-2 text-left hover:bg-white/15" onClick={()=>{writeMarkers({...skipMarkers,creditsStart:Math.floor(time)});setSkipMenu(false);}}>{t('Mark credits start')} ({fmtTime(time)})</button>
+                <button className="mt-2 block w-full rounded px-2 py-2 text-left text-red-200 hover:bg-white/15" onClick={()=>{writeMarkers({introStart:null,introEnd:null,creditsStart:null});setSkipMenu(false);}}>{t('Clear skip markers')}</button>
+              </div>}
+            </div>}
+            {canCast && <button onClick={castToDevice} aria-label={t('Cast / AirPlay')} title={t('Cast / AirPlay')} className={iconBtn}>▣</button>}
             <button onClick={toggleFs} aria-label={t(isFs ? 'Exit full screen' : 'Full screen')} className={iconBtn}>
               {isFs ? <ExitFullscreenIcon size={32} /> : <FullscreenIcon size={32} />}
             </button>

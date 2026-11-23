@@ -37,6 +37,10 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
   const [lang, setLangState] = useState(profile.lang === 'es' ? 'es' : 'en');
   const [subLang, setSubLangState] = useState(['en','es'].includes(profile.subLang) ? profile.subLang : 'off');
   const [uiLang, setUiLangState] = useState(profile.uiLang === 'es' ? 'es' : locale);
+  const [maxAge,setMaxAge]=useState(profile.maxAge ?? (profile.kids?10:18));
+  const [pinAction,setPinAction]=useState('keep');
+  const [newPin,setNewPin]=useState('');
+  const [accountPassword,setAccountPassword]=useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -44,10 +48,12 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
     setBusy(true);
     setError('');
     try {
-      const body = { name, avatar, kids, lang, subLang, uiLang };
+      const body = { name, avatar, kids, lang, subLang, uiLang, maxAge: kids?Math.min(maxAge,13):maxAge, accountPassword };
+      if(pinAction==='set')body.newPin=newPin;
+      if(pinAction==='remove')body.newPin='';
       if (isNew) await api('/api/profiles', { method: 'POST', body });
       else await api(`/api/profiles/${profile.id}`, { method: 'PUT', body });
-      await onSaved();
+      await onSaved({relock:pinAction!=='keep'});
     } catch (e) {
       setError(e.message);
       setBusy(false);
@@ -58,7 +64,7 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
     if (!window.confirm(`${t('Delete the profile and its watch history?')} (${profile.name})`)) return;
     setBusy(true);
     try {
-      await api(`/api/profiles/${profile.id}`, { method: 'DELETE' });
+      await api(`/api/profiles/${profile.id}`, { method: 'DELETE', body:{accountPassword} });
       await onDeleted();
     } catch (e) {
       setError(e.message);
@@ -132,6 +138,27 @@ function Editor({ profile, canDelete, onSaved, onCancel, onDeleted }) {
             {t("Kids profile")}
             <span className="text-sm text-[#808080]">{t("(only family-friendly titles)")}</span>
           </label>
+          <div className="mt-6 rounded border border-white/15 bg-white/5 p-4">
+            <label className="block text-sm font-semibold">{t('Maximum content age')}
+              <select value={kids?Math.min(maxAge,13):maxAge} onChange={e=>setMaxAge(Number(e.target.value))} className="mt-2 w-full rounded bg-[#242424] p-2 text-white">
+                {[[0,'All ages'],[7,'7+'],[10,'10+'],[13,'13+'],...(kids?[]:[[16,'16+'],[18,'Unrestricted']])].map(([age,label])=><option key={age} value={age}>{t(label)}</option>)}
+              </select>
+            </label>
+            {!isNew&&<div className="mt-4">
+              <p className="mb-2 text-sm font-semibold">{t('Profile PIN')} {profile.hasPin?'🔒':''}</p>
+              <select value={pinAction} onChange={e=>setPinAction(e.target.value)} className="w-full rounded bg-[#242424] p-2">
+                <option value="keep">{t('Keep current PIN')}</option><option value="set">{t('Set or change PIN')}</option><option value="remove">{t('Remove PIN')}</option>
+              </select>
+              {pinAction==='set'&&<input type="password" inputMode="numeric" autoComplete="new-password" pattern="[0-9]{4,8}" maxLength={8}
+                placeholder={t('New 4–8 digit PIN')} value={newPin} onChange={e=>setNewPin(e.target.value.replace(/\D/g,''))}
+                className="mt-2 w-full rounded bg-[#333] p-3"/>}
+            </div>}
+            <label className="mt-4 block text-xs text-white/65">{t('Account password (required for sensitive changes)')}
+              <input type="password" autoComplete="current-password" value={accountPassword} onChange={e=>setAccountPassword(e.target.value)}
+                className="mt-2 block w-full rounded bg-[#333] p-3 text-base text-white" placeholder={t('Account password')}/>
+            </label>
+            <p className="mt-3 text-xs text-amber-100/70">{t('Protect adult profiles with PINs to prevent switching around age limits.')}</p>
+          </div>
         </div>
       </div>
 
@@ -171,8 +198,8 @@ export default function Profiles({ profiles, onSelect, onReload, onLogout, start
   const [manage, setManage] = useState(startInManage);
   const [editing, setEditing] = useState(null);
 
-  const reload = async () => {
-    await onReload();
+  const reload = async (options = {}) => {
+    await onReload(options);
     setEditing(null);
   };
 
