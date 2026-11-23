@@ -56,6 +56,7 @@ function SetupCard() {
 
 export function ListPage() {
   const { myList, openTitle, playTitle } = useApp();
+  const saved = myList;
   return (
     <div className="px-[4%] pb-24 pt-28 animate-fadeIn">
       <h1 className="mb-8 text-3xl font-bold"><Localized text={"My List"} /></h1>
@@ -78,6 +79,7 @@ export default function Browse({ page, historyVersion, suspended }) {
   const [state, setState] = useState({ loading: true });
   const [history, setHistory] = useState([]);
   const [recommended,setRecommended]=useState([]);
+  const [followedShows,setFollowedShows]=useState([]);
   const [home,setHome]=useState({settings:{hideWatched:false},completedMovieIds:[],watchAgain:[]});
   const [reload, setReload] = useState(0);
 
@@ -101,6 +103,13 @@ export default function Browse({ page, historyVersion, suspended }) {
   useEffect(() => {
     if (page === 'home') loadHistory();
   }, [page, profile.id, historyVersion, loadHistory]);
+
+  useEffect(()=>{
+    if(page!=='home'){setFollowedShows([]);return undefined;}
+    let alive=true;
+    api('/api/followed-shows').then(d=>alive&&setFollowedShows(d.items||[])).catch(()=>alive&&setFollowedShows([]));
+    return ()=>{alive=false;};
+  },[page,profile.id]);
 
   useEffect(()=>{
     if(page!=='home'){setRecommended([]);return;}
@@ -163,6 +172,12 @@ export default function Browse({ page, historyVersion, suspended }) {
             {hidden?t('Show watched movies'):t('Hide watched movies')}
           </button>
         </div>}
+
+        {page==='home'&&followedShows.length>0&&<Row title={t('Following — new episode alerts')} count={followedShows.length}>
+          {followedShows.map(item=><Card key={`follow-tv-${item.id}`}
+            item={{...item,type:'tv'}} onOpen={()=>openTitle({type:'tv',id:item.id})}
+            onPlay={()=>playTitle({type:'tv',id:item.id,title:item.title,poster:item.poster})}/>) }
+        </Row>}
 
         {page==='home'&&picks.length>0&&<Row title={t('Recommended for you')} count={picks.length}>
           {picks.map(item=><Card key={`${item.type}-${item.id}`} item={item} onOpen={()=>openTitle(item)} onPlay={()=>playTitle(item)}/>)}

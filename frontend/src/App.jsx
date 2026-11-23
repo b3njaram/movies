@@ -448,6 +448,7 @@ export default function App() {
         <Header
           page={page}
           onNav={nav}
+          onOpenTitle={openTitle}
           query={query}
           onQuery={setQuery}
           profile={profile}

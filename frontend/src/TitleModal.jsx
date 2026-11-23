@@ -22,7 +22,7 @@ function Hero({ data, children, onClose }) {
 
 export default function TitleModal({ target, onClose, onOpenOther }) {
   const { t } = useLocale();
-  const { play, inList, toggleList, download } = useApp();
+  const { play, inList, toggleList, download, notify } = useApp();
   const scrollRef = useRef(null);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -31,6 +31,8 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
   const [season, setSeason] = useState(null);
   const [episodes, setEpisodes] = useState({});
   const [showSources, setShowSources] = useState(false);
+  const [following,setFollowing]=useState(null);
+  const [followBusy,setFollowBusy]=useState(false);
   const [epSources, setEpSources] = useState(null); // "season:episode" whose source list is open
   const requested = useRef(new Set());
 
@@ -66,6 +68,32 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
       alive = false;
     };
   }, [type, id]);
+
+  useEffect(() => {
+    let active=true;
+    setFollowing(null);
+    setFollowBusy(false);
+    if(type==='tv')api('/api/followed-shows').then(d=>{
+      if(active)setFollowing((d.items||[]).find(item=>item.id===Number(id))||false);
+    }).catch(()=>{if(active)setFollowing(false);});
+    return ()=>{active=false;};
+  },[type,id]);
+
+  async function toggleFollow(){
+    if(type!=='tv'||!data||followBusy)return;
+    setFollowBusy(true);
+    try{
+      if(following){
+        await api(`/api/followed-shows/${id}`,{method:'DELETE'});
+        setFollowing(false);
+        notify(t('Episode alerts turned off.'));
+      }else{
+        const result=await api('/api/followed-shows',{method:'POST',body:{id:Number(id)}});
+        setFollowing(result.follow);
+        notify(t('You will be notified when new episodes air.'));
+      }
+    }catch(e){notify(e.message);}finally{setFollowBusy(false);}
+  }
 
   // Episodes are cached per "<title>:<season>"; each season is requested at most once.
   useEffect(() => {
@@ -154,6 +182,13 @@ export default function TitleModal({ target, onClose, onOpenOther }) {
                 >
                   {listed ? <CheckIcon size={20} /> : <PlusIcon size={20} />}
                 </button>
+                {type==='tv'&&<button type="button" onClick={toggleFollow}
+                  disabled={following===null||followBusy}
+                  aria-pressed={Boolean(following)}
+                  className={`rounded border px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${following?'border-[#46d369] bg-[#164728] text-white':'border-white/60 bg-black/50 hover:bg-white/20'}`}
+                  title={t('Alerts use TMDB air dates, not source availability.')}>
+                  {following?t('Following episodes'):t('Follow new episodes')}
+                </button>}
                 <button
                   onClick={() => setShowSources((v) => !v)}
                   aria-label={t("Choose a source")}

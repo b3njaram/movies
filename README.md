@@ -1,5 +1,7 @@
 # StreamHub
 
+**Phase 7:** Follow your favorite TV shows, see them on the homepage, and receive private, deduplicated alerts when TMDB records newly aired episodes. No new keys or Docker mounts. See [Episode tracking](docs/episode-tracking.md).
+
 **Phase 6:** private notification bell for downloads and requests, per-profile watched-movie homepage filters and Watch Again, same-origin API protection, hardened login limiting, and fewer duplicate TMDB requests. See [Phase 6 guide](docs/phase6.md).
 
 **Phase 5 (Library & captions):** Conservative TMDB matching for local files, manual poster corrections, embedded text subtitle extraction for local/saved videos, and watch-party chat. See [Phase 5 guide](docs/phase5.md).
