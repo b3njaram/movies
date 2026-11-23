@@ -10,6 +10,7 @@ export default function NotificationBell({onNavigate,onOpenTitle}) {
   const [data,setData]=useState(EMPTY);
   const [open,setOpen]=useState(false);
   const [error,setError]=useState('');
+  const [pushState,setPushState]=useState('loading');
   const root=useRef(null);
   useEffect(()=>{
     let active=true;
@@ -23,6 +24,32 @@ export default function NotificationBell({onNavigate,onOpenTitle}) {
     document.addEventListener('visibilitychange',visibility);
     return ()=>{active=false;clearInterval(timer);document.removeEventListener('visibilitychange',visibility);};
   },[]);
+  useEffect(()=>{
+    let active=true;
+    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)||!window.isSecureContext){setPushState('unsupported');return;}
+    navigator.serviceWorker.ready.then(r=>r.pushManager.getSubscription()).then(sub=>active&&setPushState(sub?'on':'off')).catch(()=>active&&setPushState('unsupported'));
+    return()=>{active=false;};
+  },[]);
+  const togglePush=async()=>{
+    try{
+      setError('');
+      const registration=await navigator.serviceWorker.ready;
+      const existing=await registration.pushManager.getSubscription();
+      if(existing){
+        await api('/api/push/subscription',{method:'DELETE',body:{endpoint:existing.endpoint}});
+        await existing.unsubscribe();setPushState('off');return;
+      }
+      if(await Notification.requestPermission()!=='granted'){setError(t('Notification permission was not granted.'));return;}
+      const {publicKey}=await api('/api/push/public-key');
+      const encoded=publicKey.replace(/-/g,'+').replace(/_/g,'/');
+      const decoded=atob(encoded.padEnd(Math.ceil(encoded.length/4)*4,'='));
+      const key=Uint8Array.from(decoded,ch=>ch.charCodeAt(0));
+      const sub=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+      try{await api('/api/push/subscription',{method:'POST',body:sub.toJSON()});}
+      catch(e){await sub.unsubscribe();throw e;}
+      setPushState('on');
+    }catch(e){setError(e.message||'Push notification setup failed.');}
+  };
   useEffect(()=>{
     if(!open)return undefined;
     const close=e=>{if(root.current&&!root.current.contains(e.target))setOpen(false);};
@@ -60,6 +87,12 @@ export default function NotificationBell({onNavigate,onOpenTitle}) {
           <p className="mt-1 text-xs leading-relaxed text-[#b3b3b3]">{item.message}</p>
           <time className="mt-1 block text-[11px] text-white/45" dateTime={new Date(item.createdAt).toISOString()}>{new Date(item.createdAt).toLocaleString()}</time>
         </button>)}
+      </div>
+      <div className="border-t border-white/15 p-3 text-xs">
+        <div className="flex items-center justify-between gap-2"><span>{t('Phone push notifications')}</span>
+          <button disabled={pushState==='unsupported'||pushState==='loading'} type="button" onClick={togglePush}
+            className="rounded border border-white/30 px-3 py-2 disabled:opacity-40">{pushState==='on'?t('Disable push'):t('Enable push')}</button>
+        </div><p className="mt-2 text-white/50">{t('Requires HTTPS, an installed PWA on iPhone, and notification permission.')}</p>
       </div>
       {error&&<p role="alert" className="px-4 py-2 text-xs text-rose-300">{error}</p>}
     </div>}

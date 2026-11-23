@@ -15,6 +15,7 @@ export const NAV = [
   ['list', 'My List'],
   ['discover', 'Discover'],
   ['library', 'Library'],
+  ['offline', 'Offline'],
   ['community', 'Community'],
   ['playback', 'Settings'],
 ];

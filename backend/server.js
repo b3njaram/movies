@@ -1,4 +1,7 @@
 import { spawn } from 'child_process';
+import {castSecret,signCastToken,verifyCastToken,castSupportedPath} from './cast-token.js';
+import {db} from './db.js';
+import {getPushPublicKey,savePushSubscription,deletePushSubscription,startPushDelivery} from './push.js';
 import { Readable } from 'stream';
 import express from 'express';
 import cookieParser from 'cookie-parser';
@@ -114,6 +117,32 @@ app.get('/api/auth/me', (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: 'Not signed in.', code: 'AUTH' });
   res.json({ username: user.username, isAdmin: Boolean(user.isAdmin) });
+});
+
+// Receiver-friendly access to exactly one previously authorized, saved media file.
+// The token carries owner + profile + item + expiry and is verified on every Range
+// request. No login cookie or administrator key is ever sent to Chromecast.
+app.get('/api/cast/media/:kind/:id', (req,res)=>{
+  const claims=verifyCastToken(castSecret(),req.query.token,req.params.kind,req.params.id);
+  if(!claims)return res.sendStatus(403);
+  const user=db.prepare('SELECT id,disabled FROM users WHERE id=?').get(claims.u);
+  const profile=getProfile(claims.u,claims.p);
+  if(!user||user.disabled||!profile||profile.maxAge<18)return res.sendStatus(403);
+  let file;
+  if(claims.k==='library'){
+    const job=getDownload(claims.i);
+    if(!job||job.user_id!==claims.u||job.profile_id!==claims.p)return res.sendStatus(404);
+    file=localFileStatus(job);
+  }else{
+    file=localMediaFile(claims.i)?.file;
+  }
+  if(!file)return res.sendStatus(404);
+  if(!castSupportedPath(file))return res.status(415).json({error:'Chromecast needs an MP4 or WebM video. Convert this file to a compatible format first.'});
+  res.setHeader('Access-Control-Allow-Origin','*');
+  res.setHeader('Cache-Control','no-store');
+  res.setHeader('Cross-Origin-Resource-Policy','cross-origin');
+  res.type(/\.webm$/i.test(file)?'video/webm':'video/mp4');
+  res.sendFile(file,{acceptRanges:true});
 });
 
 // Everything below requires a valid session.
@@ -670,6 +699,9 @@ app.get('/api/recommendations',requireTmdb,withProfile,wrap(async(req,res)=>{
 
 
 // Private profile notifications and home layout choices.
+app.get('/api/push/public-key',withProfile,(req,res)=>res.json({publicKey:getPushPublicKey()}));
+app.post('/api/push/subscription',withProfile,(req,res)=>res.status(201).json(savePushSubscription(req.profile.id,req.body)));
+app.delete('/api/push/subscription',withProfile,(req,res)=>res.json(deletePushSubscription(req.profile.id,req.body?.endpoint)));
 app.get('/api/notifications',withProfile,(req,res)=>res.json(listNotifications(req.profile.id)));
 app.post('/api/notifications/read',withProfile,(req,res)=>res.json(readNotifications(req.profile.id,req.body||{})));
 app.delete('/api/notifications/:id',withProfile,(req,res)=>res.json(deleteNotification(req.profile.id,req.params.id)));
@@ -999,6 +1031,24 @@ app.post('/api/downloads/queue/:id',withProfile,(req,res)=>{
   }else return res.status(400).json({error:'This action is not available for this download.'});
   res.json({ok:true});
 });
+// This action requires a currently unlocked adult profile and a saved video.
+// Receiver URLs expire after six hours; they never grant access to other files.
+app.post('/api/cast/session',withProfile,wrap(async(req,res)=>{
+  if(req.profile.maxAge<18)throw httpError(403,'Casting from restricted profiles is not supported.');
+  const kind=String(req.body?.kind||'');const id=Number(req.body?.id);
+  if(!['library','media'].includes(kind)||!Number.isSafeInteger(id)||id<1)throw httpError(400,'Invalid casting item.');
+  let file;
+  if(kind==='library'){
+    const job=getDownload(id);
+    if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)throw httpError(404,'Video not found.');
+    file=localFileStatus(job);
+  }else file=localMediaFile(id)?.file;
+  if(!file)throw httpError(404,'Video not found.');
+  if(!castSupportedPath(file))throw httpError(415,'Chromecast requires a compatible MP4 or WebM video.');
+  const token=signCastToken(castSecret(),{userId:req.user.id,profileId:req.profile.id,kind,id});
+  res.json({path:`/api/cast/media/${kind}/${id}?token=${encodeURIComponent(token)}`,expiresInSeconds:21600,mime:/\.webm$/i.test(file)?'video/webm':'video/mp4'});
+}));
+
 app.get('/api/library/stream/:id',withActiveProfile,wrap(async(req,res)=>{
   const job=getDownload(Number(req.params.id));
   if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)return res.sendStatus(404);
@@ -1468,6 +1518,7 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err.message || 'Something went wrong.', code: err.code });
 });
 
+startPushDelivery();
 app.listen(PORT, () => {
   console.log(`StreamHub backend listening on :${PORT}`);
   console.log(`  Prowlarr:   ${PROWLARR_URL}`);
