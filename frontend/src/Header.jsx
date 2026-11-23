@@ -19,7 +19,7 @@ export const NAV = [
   ['playback', 'Settings'],
 ];
 
-export default function Header({ page, onNav, query, onQuery, profile, isAdmin = false, tvMode = false, onTvMode, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
+export default function Header({ page, onNav, onOpenTitle, query, onQuery, profile, isAdmin = false, tvMode = false, onTvMode, profiles, onSwitch, onManage, onLogout, canSearch = true }) {
   const { t } = useLocale();
   const { setUiLang } = useApp();
   const navItems = isAdmin ? [...NAV, ['admin', 'Admin']] : NAV;
@@ -156,7 +156,7 @@ export default function Header({ page, onNav, query, onQuery, profile, isAdmin =
             </div>
           )}
 
-          <NotificationBell key={profile.id} onNavigate={onNav} />
+          <NotificationBell key={profile.id} onNavigate={onNav} onOpenTitle={onOpenTitle} />
           <button className="shrink-0 rounded border border-white/30 px-2 py-1 text-xs font-bold text-white/85 hover:bg-white/10"
             aria-label={t('Change language')} title={t('Change language')}
             onClick={() => setUiLang(profile.uiLang === 'es' ? 'en' : 'es')}>

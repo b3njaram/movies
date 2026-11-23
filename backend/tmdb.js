@@ -160,6 +160,17 @@ export async function getTitle(type, id) {
   });
 }
 
+// Lightweight, separately cached airing status. This is intentionally fresher than
+// the 24-hour title details cache and doesn't fetch credits, images or trailers.
+export async function getTvAirStatus(id) {
+  const n = Number(id);
+  if (!Number.isSafeInteger(n) || n < 1) throw httpError(400, 'Invalid TV show ID.');
+  return cached(`tv-air:${n}`, 60 * 60, async () => {
+    const d = await tmdbFetch(`/tv/${n}`);
+    return { last: d.last_episode_to_air || null, next: d.next_episode_to_air || null };
+  });
+}
+
 // The title as Spanish-language releases are named (e.g. "El Padrino" for "The Godfather").
 export async function getLocalizedTitle(type, id, language = 'es-MX') {
   return cached(`title-loc:${language}:${type}:${id}`, 30 * 24 * 3600, async () => {

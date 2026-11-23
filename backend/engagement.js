@@ -4,6 +4,7 @@ import { db } from './db.js';
 
 const safeText = (value, max) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max);
 const destinations = new Set(['library', 'community', 'home']);
+const validDestination = value => destinations.has(value) || /^tv:[1-9]\d{0,9}$/.test(value);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS profile_notifications (
@@ -35,7 +36,7 @@ export function addNotification(profileId, eventKey, kind, title, message, desti
   const result = db.prepare(`INSERT OR IGNORE INTO profile_notifications
     (profile_id,event_key,kind,title,message,destination,created_at)
     VALUES(?,?,?,?,?,?,?)`).run(id,key,safeText(kind,32),heading,safeText(message,260),
-      destinations.has(destination) ? destination : 'home',Date.now());
+      validDestination(destination) ? destination : 'home',Date.now());
   // Bound disk growth for small servers while retaining at least 120 recent entries.
   if (result.changes) db.prepare(`DELETE FROM profile_notifications WHERE profile_id=? AND id NOT IN
     (SELECT id FROM profile_notifications WHERE profile_id=? ORDER BY id DESC LIMIT 120)`).run(id,id);

@@ -5,7 +5,7 @@ import {useLocale} from './locale';
 const EMPTY={items:[],unread:0};
 const routeFor = destination => ['library','community','home'].includes(destination) ? destination : 'home';
 
-export default function NotificationBell({onNavigate}) {
+export default function NotificationBell({onNavigate,onOpenTitle}) {
   const {t}=useLocale();
   const [data,setData]=useState(EMPTY);
   const [open,setOpen]=useState(false);
@@ -38,7 +38,9 @@ export default function NotificationBell({onNavigate}) {
   const view=async item=>{
     if(!item.readAt)await mark({id:item.id});
     setOpen(false);
-    onNavigate(routeFor(item.destination));
+    const target=/^tv:([1-9]\d{0,9})$/.exec(item.destination||'');
+    if(target&&onOpenTitle)onOpenTitle({type:'tv',id:Number(target[1])});
+    else onNavigate(routeFor(item.destination));
   };
   return <div className="relative shrink-0" ref={root}>
     <button type="button" aria-label={t('Notifications')} aria-expanded={open} title={t('Notifications')}

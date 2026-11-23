@@ -3,6 +3,8 @@ import { Readable } from 'stream';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import {LoginLimiter,isAllowedMutation} from './security-rules.js';
+import {listFollowedShows, followShow, unfollowShow, dueFollowedShows, recordEpisodeCheck, markEpisodeCheckFailure} from './episode-following.js';
+import {showId} from './episode-following-rules.js';
 import {addNotification,listNotifications,readNotifications,deleteNotification,getHomePreferences,setHomePreferences,completedMovies,watchAgainMovies} from './engagement.js';
 import {
   getUserByUsername,
@@ -33,7 +35,7 @@ import {
   getFirstEpisode,
   getEpisodeName,
   searchTitles,
-  getLocalizedTitle, getDiscover, getRecommendations,
+  getLocalizedTitle, getDiscover, getRecommendations, getTvAirStatus,
 } from './tmdb.js';
 import { searchSources, lookupRef, bytesToSize, describeRelease } from './sources.js';
 import { listAccounts, createAccount, updateAccount, adminSummary } from './admin.js';
@@ -683,6 +685,47 @@ app.get('/api/home/preferences',withProfile,wrap(async(req,res)=>{
   res.json({settings:getHomePreferences(req.profile.id),completedMovieIds:watched,watchAgain});
 }));
 app.put('/api/home/preferences',withProfile,(req,res)=>res.json({settings:setHomePreferences(req.profile.id,req.body)}));
+
+// Opt-in TV episode alerts. TMDB records air dates, not proof that media exists.
+app.get('/api/followed-shows',withProfile,wrap(async(req,res)=>{
+  let items=listFollowedShows(req.profile.id);
+  if(req.profile.maxAge<18){
+    const permitted=await Promise.all(items.map(async item=>{
+      try{await enforceTitleRating(req.profile,'tv',item.id);return item;}catch{return null;}
+    }));
+    items=permitted.filter(Boolean);
+  }
+  res.json({items});
+}));
+app.post('/api/followed-shows',requireTmdb,withProfile,wrap(async(req,res)=>{
+  const id=showId(req.body?.id);
+  const title=await getTitle('tv',id);
+  if(req.profile.maxAge<18)await enforceTitleRating(req.profile,'tv',id);
+  const status=await getTvAirStatus(id);
+  const follow=followShow(req.profile.id,id,title.title,title.poster,status);
+  res.status(201).json({follow});
+}));
+app.delete('/api/followed-shows/:id',withProfile,(req,res)=>res.json(unfollowShow(req.profile.id,req.params.id)));
+
+let checkingEpisodes=false;
+async function scanFollowedEpisodes(){
+  if(checkingEpisodes||!tmdbEnabled())return;
+  checkingEpisodes=true;
+  try{
+    const statusById=new Map();
+    for(const row of dueFollowedShows()){
+      try{
+        if(row.maxAge<18)await enforceTitleRating({maxAge:row.maxAge},'tv',row.tvId);
+        if(!statusById.has(row.tvId))statusById.set(row.tvId,getTvAirStatus(row.tvId));
+        const status=await statusById.get(row.tvId);
+        recordEpisodeCheck(row,status);
+      }catch(e){
+        markEpisodeCheckFailure(row);
+        if(e.status>=500||!e.status)console.warn(`[episodes] Could not check show ${row.tvId}: ${e.message}`);
+      }
+    }
+  }finally{checkingEpisodes=false;}
+}
 
 // ---------------------------------------------------------------------------
 // Sources (Prowlarr)
@@ -1431,6 +1474,9 @@ app.listen(PORT, () => {
   console.log(`  TorrServer: ${TORRSERVER_URL}`);
   console.log(`  TMDB:       ${tmdbEnabled() ? 'configured' : 'NOT configured (set TMDB_API_KEY to enable the catalog)'}`);
   startAdvancedJobs();
+  // Small, non-overlapping TMDB poll. Only previously followed shows are checked.
+  setTimeout(()=>scanFollowedEpisodes().catch(e=>console.warn('[episodes]',e.message)),25000).unref();
+  setInterval(()=>scanFollowedEpisodes().catch(e=>console.warn('[episodes]',e.message)),10*60000).unref();
   setTimeout(async () => {
     const p = await checkProwlarr();
     if (!p.ok) console.error(`[startup] ${p.reason}`);

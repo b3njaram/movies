@@ -3,6 +3,12 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 // Literal English messages are the keys. Missing keys display English rather
 // than blank UI. Localized strings are kept with the application, no network.
 export const ES = {
+  'Follow new episodes': 'Seguir nuevos episodios',
+  'Following episodes': 'Siguiendo episodios',
+  'Episode alerts turned off.': 'Se desactivaron los avisos de episodios.',
+  'You will be notified when new episodes air.': 'Recibirás avisos cuando se estrenen nuevos episodios.',
+  'Alerts use TMDB air dates, not source availability.': 'Los avisos usan fechas de TMDB; no garantizan fuentes disponibles.',
+  'Following — new episode alerts': 'Siguiendo — avisos de nuevos episodios',
   'Back to browsing': 'Volver a explorar',
   'Choose audio language': 'Elegir idioma de audio',
   'Volume': 'Volumen',

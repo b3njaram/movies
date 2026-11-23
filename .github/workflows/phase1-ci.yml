@@ -1,7 +1,7 @@
 name: StreamHub checks
 on:
   push:
-    branches: [main, 'phase1-*', 'phase2-*', 'phase3-*', 'phase4-*', 'phase5-*', 'phase6-*']
+    branches: [main, 'phase1-*', 'phase2-*', 'phase3-*', 'phase4-*', 'phase5-*', 'phase6-*', 'phase7-*']
   pull_request:
     branches: [main]
 jobs:
@@ -21,6 +21,7 @@ jobs:
           python3 tests/phase4-migration.test.py
           python3 tests/test_recovery.py
           python3 tests/phase6-migration.test.py
+          python3 tests/phase7-migration.test.py
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --no-audit --no-fund
@@ -28,6 +29,8 @@ jobs:
         run: node --test backend/integration/*.test.js
       - name: Validate backend JavaScript
         run: |
+          node --check backend/episode-following.js
+          node --check backend/episode-following-rules.js
           node --check backend/community-db.js
           node --check backend/engagement.js
           node --check backend/security-rules.js
