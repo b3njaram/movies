@@ -8,6 +8,8 @@ import Login from './Login';
 import Profiles from './Profiles';
 import Header from './Header';
 import Browse, { ListPage } from './Browse';
+import Discover from './Discover';
+import {defaultTvMode,useTvNavigation} from './tv';
 import SearchView from './SearchView';
 import TitleModal from './TitleModal';
 import Player from './Player';
@@ -24,9 +26,29 @@ function Splash() {
   );
 }
 
+function ProfilePinDialog({target,onUnlock,onCancel}) {
+  const {t}=useLocale();
+  const [pin,setPin]=useState('');const [error,setError]=useState('');const [busy,setBusy]=useState(false);
+  const submit=async(e)=>{e.preventDefault();setBusy(true);setError('');try{await onUnlock(target,pin);}catch(err){setError(err.message);setBusy(false);setPin('');}};
+  return <div className="fixed inset-0 z-[600] flex items-center justify-center bg-black/90 p-4" role="dialog" aria-modal="true" aria-label={t('Unlock profile')}>
+    <form onSubmit={submit} className="w-full max-w-sm rounded-xl border border-white/20 bg-[#181818] p-7 shadow-2xl">
+      <h2 className="text-2xl font-semibold">{t('Unlock profile')}: {target.name}</h2>
+      <p className="mt-2 text-sm text-white/60">{t(target.hasPin?'Enter the profile PIN to continue.':'Enter the account password to switch to this profile.')}</p>
+      <input autoFocus required type="password" inputMode={target.hasPin?"numeric":"text"} pattern={target.hasPin?"[0-9]{4,8}":undefined} maxLength={target.hasPin?8:200} autoComplete="off" placeholder={t(target.hasPin?'Profile PIN':'Account password')}
+        className="mt-5 w-full rounded bg-white/10 p-3 text-lg tracking-[0.3em] outline-none focus:ring-2 focus:ring-white" value={pin} onChange={e=>setPin(target.hasPin?e.target.value.replace(/\D/g,''):e.target.value)} />
+      {error&&<p className="mt-3 text-sm text-rose-300" role="alert">{t(error)}</p>}
+      <div className="mt-5 flex gap-3"><button disabled={busy} type="submit" className="btn-white flex-1">{t('Unlock')}</button><button type="button" onClick={onCancel} className="btn-gray flex-1">{t('Cancel')}</button></div>
+    </form>
+  </div>;
+}
+
 export default function App() {
   const { setLang: setLocale, t } = useLocale();
   const [auth, setAuth] = useState({ status: 'loading', username: null, isAdmin: false });
+  const [pinTarget,setPinTarget]=useState(null);
+  const [tvMode,setTvMode]=useState(defaultTvMode);
+  useTvNavigation(tvMode);
+  const toggleTvMode=useCallback(()=>setTvMode(v=>{try{localStorage.setItem('sh_tv_mode',v?'0':'1');}catch{}return !v;}),[]);
   const [profiles, setProfiles] = useState([]);
   const [profile, setProfile] = useState(null);
   const [choosing, setChoosing] = useState(true);
@@ -61,6 +83,7 @@ export default function App() {
     setProfileId(null);
     setAuth({ status: 'out', username: null, isAdmin: false });
     setProfiles([]);
+    setPinTarget(null);
     setProfile(null);
     setChoosing(true);
     setManageMode(false);
@@ -88,7 +111,8 @@ export default function App() {
         const list = await loadProfiles();
         const remembered = list.find((p) => String(p.id) === getProfileId());
         setAuth({ status: 'in', username: me.username, isAdmin: Boolean(me.isAdmin) });
-        if (remembered) {
+        if (remembered && !remembered.hasPin && !remembered.requiresPassword) {
+          try { await api(`/api/profiles/${remembered.id}/activate`,{method:'POST',body:{}}); } catch {setChoosing(true);return;}
           setProfile(remembered);
           setLocale(remembered.uiLang === 'es' ? 'es' : 'en');
           setChoosing(false);
@@ -127,7 +151,15 @@ export default function App() {
     resetSession();
   }, [resetSession]);
 
-  const selectProfile = useCallback((p) => {
+  const selectProfile = useCallback(async (p,pin) => {
+    if((p.hasPin || p.requiresPassword) && pin === undefined) {setPinTarget(p);return;}
+    try {
+      await api(`/api/profiles/${p.id}/activate`,{method:'POST',body:p.hasPin?{pin:pin||''}:{accountPassword:pin||''}});
+    } catch(e) {
+      if(pin === undefined){notify(e.message);return;}
+      throw e;
+    }
+    setPinTarget(null);
     setProfileId(p.id);
     setProfile(p);
     setChoosing(false);
@@ -139,10 +171,11 @@ export default function App() {
     setBannerHidden(false);
     setLocale(p?.uiLang === 'es' ? 'es' : 'en');
     window.scrollTo(0, 0);
-  }, [setLocale]);
+  }, [setLocale,notify]);
 
-  const reloadProfiles = useCallback(async () => {
+  const reloadProfiles = useCallback(async ({relock=false}={}) => {
     const list = await loadProfiles();
+    if(relock){setProfileId(null);setChoosing(true);setProfile(null);return;}
     setProfile((current) => {
       if (!current) return current;
       const fresh = list.find((p) => p.id === current.id);
@@ -346,6 +379,9 @@ export default function App() {
   const setSubLang = useCallback(value => saveProfilePreference('subLang', value), [saveProfilePreference]);
   const setUiLang = useCallback(value => saveProfilePreference('uiLang', value), [saveProfilePreference]);
 
+  const cancelPin=()=>setPinTarget(null);
+  const pinDialog=pinTarget && <ProfilePinDialog key={pinTarget.id} target={pinTarget} onUnlock={selectProfile} onCancel={cancelPin}/>;
+
   const ctx = useMemo(
     () => ({ profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang, setSubLang, setUiLang }),
     [profile, myList, inList, toggleList, openTitle, play, playTitle, notify, download, setLang, setSubLang, setUiLang]
@@ -366,6 +402,7 @@ export default function App() {
 
   if (choosing || !profile) {
     return (
+      <>
       <Profiles
         key={manageMode ? 'manage' : 'choose'}
         profiles={profiles}
@@ -382,6 +419,8 @@ export default function App() {
             : undefined
         }
       />
+      {pinDialog}
+      </>
     );
   }
 
@@ -390,14 +429,16 @@ export default function App() {
 
   return (
     <AppContext.Provider value={ctx}>
-      <div className="min-h-screen bg-nf-black">
+      <div className={`min-h-screen bg-nf-black ${tvMode ? 'tv-mode' : ''}`}>
         <Header
           page={page}
           onNav={nav}
           query={query}
           onQuery={setQuery}
           profile={profile}
-          isAdmin={auth.isAdmin}
+          isAdmin={auth.isAdmin && profile.maxAge>=18}
+          tvMode={tvMode}
+          onTvMode={toggleTvMode}
           profiles={profiles}
           onSwitch={selectProfile}
           onManage={() => {
@@ -417,10 +458,12 @@ export default function App() {
         )}
 
         <main>
-          {page === 'admin' && auth.isAdmin ? (
+          {page === 'admin' && auth.isAdmin && profile.maxAge>=18 ? (
             <Admin />
           ) : searching ? (
             <SearchView query={query.trim()} />
+          ) : page === 'discover' ? (
+            <Discover />
           ) : page === 'list' ? (
             <ListPage />
           ) : (
@@ -431,6 +474,7 @@ export default function App() {
         {modal && <TitleModal target={modal} onClose={closeTop} onOpenOther={(i) => setModal({ type: i.type, id: i.id })} />}
         {playback && <Player key={playback.key} spec={playback.spec} onClose={closeTop} onNext={playNext} />}
 
+        {pinDialog}
         <InstallPrompt />
         {toast && (
           <div key={toast.id} className="fixed bottom-6 left-6 z-[300] max-w-[80vw] animate-fadeInUp rounded bg-white px-5 py-3 text-sm font-medium text-black shadow-2xl">

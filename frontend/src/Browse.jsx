@@ -76,6 +76,7 @@ export default function Browse({ page, historyVersion, suspended }) {
   const { profile, myList, play, openTitle, playTitle } = useApp();
   const [state, setState] = useState({ loading: true });
   const [history, setHistory] = useState([]);
+  const [recommended,setRecommended]=useState([]);
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
@@ -98,6 +99,13 @@ export default function Browse({ page, historyVersion, suspended }) {
   useEffect(() => {
     if (page === 'home') loadHistory();
   }, [page, profile.id, historyVersion, loadHistory]);
+
+  useEffect(()=>{
+    if(page!=='home'){setRecommended([]);return;}
+    let alive=true;
+    api('/api/recommendations').then(d=>alive&&setRecommended(d.items||[])).catch(()=>alive&&setRecommended([]));
+    return()=>{alive=false;};
+  },[page,profile.id,historyVersion]);
 
   const data = state.data;
   const showHistory = page === 'home' && history.length > 0;
@@ -131,6 +139,10 @@ export default function Browse({ page, historyVersion, suspended }) {
 
       <div className="relative z-10 -mt-[11vw] sm:-mt-[9vw]">
         {showHistory && <HistoryRow history={history} play={play} openTitle={openTitle} />}
+
+        {page==='home'&&recommended.length>0&&<Row title={t('Recommended for you')} count={recommended.length}>
+          {recommended.map(item=><Card key={`${item.type}-${item.id}`} item={item} onOpen={()=>openTitle(item)} onPlay={()=>playTitle(item)}/>)}
+        </Row>}
 
         {page === 'home' && myList.length > 0 && (
           <Row title={t("My List")} count={myList.length}>

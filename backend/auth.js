@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { db } from './db.js';
 
 const COOKIE_NAME = 'sh_session';
+const PROFILE_COOKIE = 'sh_active_profile';
 
 const SECRET =
   process.env.JWT_SECRET ||
@@ -35,6 +36,23 @@ export function issueSession(res, user, remember = true) {
 
 export function clearSession(res) {
   res.clearCookie(COOKIE_NAME, { path: '/' });
+  res.clearCookie(PROFILE_COOKIE, { path: '/' });
+}
+
+export function issueActiveProfile(res, user, profile, pinVersion) {
+  const token = jwt.sign({ u: user.id, p: profile.id, v: pinVersion, s: user.sessionVersion || 0, scope: 'profile' }, SECRET, { expiresIn: '12h' });
+  res.cookie(PROFILE_COOKIE, token, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 12 * 3600 * 1000 });
+}
+export function clearActiveProfile(res) { res.clearCookie(PROFILE_COOKIE, {path: '/'}); }
+export function getActiveProfileId(req, user) {
+  try {
+    const payload = jwt.verify(req.cookies?.[PROFILE_COOKIE], SECRET);
+    if (payload.scope !== 'profile' || Number(payload.u) !== user.id) return null;
+    const p = db.prepare('SELECT pin_version AS pinVersion FROM profiles WHERE id = ? AND user_id = ?').get(payload.p, user.id);
+    const account = db.prepare('SELECT session_version AS version FROM users WHERE id = ?').get(user.id);
+    if (!p || !account || p.pinVersion !== payload.v || account.version !== payload.s) return null;
+    return Number(payload.p);
+  } catch { return null; }
 }
 
 export function getSessionUser(req) {
@@ -44,7 +62,7 @@ export function getSessionUser(req) {
     const payload = jwt.verify(token, SECRET);
     const user = db.prepare('SELECT id, username, is_admin AS isAdmin, disabled, session_version AS sessionVersion FROM users WHERE id = ?').get(payload.sub);
     if (!user || user.disabled || (payload.v || 0) !== user.sessionVersion) return null;
-    return { id: user.id, username: user.username, isAdmin: Boolean(user.isAdmin) };
+    return { id: user.id, username: user.username, isAdmin: Boolean(user.isAdmin), sessionVersion: user.sessionVersion };
   } catch {
     return null;
   }
