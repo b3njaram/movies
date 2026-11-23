@@ -46,6 +46,7 @@ import { validatedFileRef, listSubtitleFiles, toVtt } from './subtitles.js';
 import { allowedByRating, maxAgeValue, cleanMarkers, safeContentKey, cleanDiscoverFilters } from './premium.js';
 import { thumbnailFor } from './preview.js';
 import fs from 'node:fs';
+import path from 'node:path';
 import {
   getPlaybackSettings, savePlaybackSettings, getServerOptions, updateServerOptions,
   insertDownload, getDownload, listDownloads, listReady, updateDownload, deleteDownload,
@@ -58,6 +59,7 @@ import {listCollections,createCollection,deleteCollection,changeCollectionItem,s
 import {mediaType,positiveId,roomSpec} from './community-rules.js';
 import {scanLocalMedia,listLocalMedia,localMediaFile,localMediaById,unmatchedLocalMedia,saveLocalMediaMatch,noteMatchAttempt} from './local-media.js';
 import {chooseAutomaticMatch,matchConfidence} from './metadata-match.js';
+import {auditMediaFolder} from './media-audit.js';
 import {probeLocalSubtitles,extractLocalSubtitle} from './local-subtitles.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
@@ -487,6 +489,18 @@ app.post('/api/community/parties/:code/chat',withProfile,wrap(async(req,res)=>{
 // Scanning is bounded, non-recursive beyond 3 levels, and limited to the
 // backend's existing /app/data/media directory. Nothing is downloaded.
 app.post('/api/admin/local-media/scan',requireAdmin,(req,res)=>res.json(scanLocalMedia()));
+// Read-only, bounded storage audit for missing library files and possible
+// duplicates. Kept admin-only; never automatically deletes media.
+let lastMediaAudit = { at: 0, value: null };
+app.get('/api/admin/local-media/audit',requireAdmin,wrap(async(req,res)=>{
+  if (!lastMediaAudit.value || Date.now()-lastMediaAudit.at > 120000) {
+    const rows=db.prepare('SELECT rel_path FROM local_media LIMIT 1500').all();
+    const root=path.resolve(path.dirname(process.env.DB_PATH || '/app/data/streamhub.db'), 'media');
+    const value=await auditMediaFolder(root,rows);
+    lastMediaAudit={at:Date.now(),value};
+  }
+  res.json({audit:lastMediaAudit.value});
+}));
 // Search is bounded, and only high-confidence, unambiguous matches are saved.
 // A TMDB mismatch can always be corrected manually by an administrator.
 app.post('/api/admin/local-media/auto-match',requireAdmin,requireTmdb,wrap(async(req,res)=>{

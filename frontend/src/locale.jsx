@@ -3,6 +3,23 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 // Literal English messages are the keys. Missing keys display English rather
 // than blank UI. Localized strings are kept with the application, no network.
 export const ES = {
+  'Media storage audit':'Auditoría de archivos multimedia',
+  'Read-only scan for missing indexed videos and potential duplicates; no files are deleted.':'Revisión de archivos indexados faltantes y posibles duplicados; no se elimina ningún archivo.',
+  'Scanning…':'Analizando…', 'Scan storage':'Analizar almacenamiento', 'Files scanned':'Archivos analizados',
+  'Storage used':'Almacenamiento usado', 'Missing indexed files':'Archivos indexados faltantes',
+  'Possible duplicate groups':'Grupos de posibles duplicados',
+  'Scan limited to protect server performance.':'Análisis limitado para proteger el rendimiento del servidor.',
+
+  'Resuming':'Reanudando', 'Pause download':'Pausar descarga', 'Resume download':'Reanudar descarga',
+  'Incomplete downloads':'Descargas incompletas', 'Incomplete':'Incompletas', 'Saved':'Guardados',
+  'Device storage':'Almacenamiento del dispositivo', 'Device storage budget':'Límite de almacenamiento del dispositivo',
+  'Browser space remaining':'Espacio disponible en el navegador', 'Delete this incomplete download?':'¿Eliminar esta descarga incompleta?',
+  'Download paused. Resume it from Offline Downloads.':'Descarga pausada. Reanúdala desde Descargas sin conexión.',
+  'Offline videos stay on this device. Downloads are resumable when the server supports Range requests. Keep this tab open until a download finishes or is paused.':
+    'Los videos sin conexión se guardan en este dispositivo. Las descargas se pueden reanudar cuando el servidor admite rangos de bytes. Mantén esta pestaña abierta hasta terminar o pausar.',
+  'Offline files are not encrypted or protected by your StreamHub password. Do not save private videos on a shared device.':
+    'Los archivos sin conexión no están cifrados ni protegidos por tu contraseña de StreamHub. No guardes videos privados en dispositivos compartidos.',
+
   'Follow new episodes': 'Seguir nuevos episodios',
   'Following episodes': 'Siguiendo episodios',
   'Episode alerts turned off.': 'Se desactivaron los avisos de episodios.',

@@ -14,6 +14,8 @@ export default function Admin() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [mediaAudit,setMediaAudit]=useState(null);
+  const [auditBusy,setAuditBusy]=useState(false);
   const refresh = useCallback(async () => {
     const [u,o] = await Promise.all([api('/api/admin/users'), api('/api/admin/overview')]);
     setUsers(u.users || []); setOverview(o);
@@ -88,6 +90,21 @@ export default function Admin() {
             </form>}
           </div>)}
         </div>
+      </section>
+      <section className="mt-6 rounded-lg border border-white/10 bg-[#1b1b1b] p-4 sm:p-6">
+        <h2 className="text-lg font-semibold">{t('Media storage audit')}</h2>
+        <p className="my-2 text-sm text-white/60">{t('Read-only scan for missing indexed videos and potential duplicates; no files are deleted.')}</p>
+        <button disabled={auditBusy} className="rounded bg-white px-4 py-2 font-semibold text-black disabled:opacity-50"
+          onClick={async()=>{setAuditBusy(true);try{setMediaAudit((await api('/api/admin/local-media/audit')).audit);}catch(e){setError(e.message);}finally{setAuditBusy(false);}}}>
+          {auditBusy?t('Scanning…'):t('Scan storage')}
+        </button>
+        {mediaAudit&&<div className="mt-4 text-sm">
+          <p>{t('Files scanned')}: {mediaAudit.scanned} · {t('Storage used')}: {(mediaAudit.bytes/1024**3).toFixed(2)} GB</p>
+          <p>{t('Missing indexed files')}: {mediaAudit.missing.length} · {t('Possible duplicate groups')}: {mediaAudit.possibleDuplicates.length}</p>
+          {mediaAudit.partial&&<p className="mt-1 text-amber-200">{t('Scan limited to protect server performance.')}</p>}
+          {mediaAudit.missing.length>0&&<details className="mt-3"><summary>{t('Missing indexed files')}</summary><ul className="mt-2 list-disc break-words pl-5">{mediaAudit.missing.map(f=><li key={f}>{f}</li>)}</ul></details>}
+          {mediaAudit.possibleDuplicates.length>0&&<details className="mt-3"><summary>{t('Possible duplicate groups')}</summary><ul className="mt-2 list-disc break-words pl-5">{mediaAudit.possibleDuplicates.map((g,i)=><li key={i}>{g.files.join(' · ')}</li>)}</ul></details>}
+        </div>}
       </section>
       <AdvancedAdmin />
     </div>

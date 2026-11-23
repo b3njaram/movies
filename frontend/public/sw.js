@@ -1,7 +1,7 @@
 // Only public application shell assets are cached. Never cache API responses,
 // video, authentication, downloads, profiles, or watch history.
-const NAME = 'streamhub-shell-v2';
-const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/offline.html', '/offline-store.js'];
+const NAME = 'streamhub-shell-v3';
+const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/offline.html', '/offline-store.js', '/offline-range.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(NAME).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });
@@ -13,7 +13,7 @@ self.addEventListener('fetch', event => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname.startsWith('/stream/')) return;
-  if (url.pathname === '/offline.html' || url.pathname === '/offline-store.js') {
+  if (url.pathname === '/offline.html' || url.pathname === '/offline-store.js' || url.pathname === '/offline-range.js') {
     event.respondWith(caches.match(request).then(cached => cached || fetch(request)));
     return;
   }

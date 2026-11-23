@@ -1,5 +1,7 @@
 # StreamHub
 
+**Phase 9:** Resumable OPFS offline downloads, pause/resume, on-device storage budget controls, and an admin-only read-only media audit. See [Phase 9 guide](docs/phase9.md).
+
 **Phase 8:** Download videos for device-local offline PWA playback, cast saved MP4/WebM via temporary receiver URLs, opt-in web push, subtitle sync and font controls, and Chromium offline E2E tests. See [Phase 8 guide](docs/phase8.md). The PWA offline page works independently of server login but requires device-local storage and a one-time online install.
 
 
