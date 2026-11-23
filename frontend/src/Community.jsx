@@ -110,19 +110,47 @@ function Parties(){
 }
 
 function Media({isAdmin}) {
-  const {t}=useLocale(),{notify,play}=useApp(),[items,setItems]=useState([]),[q,setQ]=useState(''),[busy,setBusy]=useState(false);
+  const {t}=useLocale(),{notify,play}=useApp();
+  const [items,setItems]=useState([]),[q,setQ]=useState(''),[busy,setBusy]=useState(false);
+  const [editing,setEditing]=useState(null),[candidates,setCandidates]=useState([]);
   const load=useCallback(()=>api('/api/local-media').then(d=>setItems(d.items||[])).catch(e=>notify(e.message)),[notify]);
   useEffect(()=>{load();},[load]);
-  const scan=async()=>{setBusy(true);try{const d=await api('/api/admin/local-media/scan',{method:'POST'});notify(`${d.found} ${t('files indexed')}`);load();}catch(e){notify(e.message);}finally{setBusy(false);}};
+  const scan=async()=>{setBusy(true);try{const d=await api('/api/admin/local-media/scan',{method:'POST'});notify(`${d.found} ${t('files indexed')}`);await load();}catch(e){notify(e.message);}finally{setBusy(false);}};
+  const autoMatch=async()=>{setBusy(true);try{const d=await api('/api/admin/local-media/auto-match',{method:'POST'});
+    notify(`${d.matched} ${t('automatically matched')}; ${d.review} ${t('need review')}${d.failed?`; ${d.failed} ${t('failed')}`:''}`);await load();
+  }catch(e){notify(e.message);}finally{setBusy(false);}};
+  const editMatch=async item=>{setEditing(item);setCandidates([]);
+    try{const d=await api(`/api/admin/local-media/${item.id}/candidates`);setCandidates(d.candidates||[]);}catch(e){notify(e.message);}};
+  const saveMatch=async item=>{if(!editing)return;
+    setBusy(true);try{await api(`/api/admin/local-media/${editing.id}/match`,{method:'PUT',body:{id:item?.id,type:item?.type,clear:!item}});
+      setEditing(null);setCandidates([]);await load();notify(t('Metadata saved.'));
+    }catch(e){notify(e.message);}finally{setBusy(false);}};
   const filtered=items.filter(i=>i.title.toLowerCase().includes(q.toLowerCase()));
   return <section className={card}><h2 className="text-xl font-bold">{t('Local media on this server')}</h2>
     <p className="my-3 text-sm text-white/60">{t('Copy owned video files into data/app/media on the host and scan the folder. No separate Docker mount is required.')}</p>
-    {isAdmin&&<button className={`${btn} mb-4`} onClick={scan} disabled={busy}>{t('Scan media folder')}</button>}
+    {isAdmin&&<div className="mb-4 flex flex-wrap gap-2">
+      <button className={btn} onClick={scan} disabled={busy}>{t('Scan media folder')}</button>
+      <button className={btn} onClick={autoMatch} disabled={busy||!items.some(i=>!i.tmdbId)}>{t('Match up to 6 titles automatically')}</button>
+    </div>}
     <input className={`${field} mb-4 w-full`} value={q} onChange={e=>setQ(e.target.value)} placeholder={t('Filter local files')}/>
-    <div className="max-h-[600px] space-y-2 overflow-y-auto">{filtered.map(i=><div key={i.id} className="flex flex-wrap items-center justify-between gap-2 rounded bg-white/5 p-3">
-      <span>{i.title}{i.season!=null&&` · S${i.season} E${i.episode}`} <small className="text-white/50">· {(i.sizeBytes/1024**3).toFixed(2)} GB</small></span>
-      <button className={btn} onClick={()=>play({type:'raw',title:i.title,localMediaId:i.id,
-        contentKey:`raw:local:${i.id}`,season:i.season,episode:i.episode})}>{t('Play')}</button></div>)}
+    {isAdmin&&editing&&<div className="mb-4 rounded-lg border border-sky-400/40 bg-slate-900 p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">{t('Match metadata')}: {editing.title}</h3>
+        <button className={btn} onClick={()=>setEditing(null)}>{t('Close')}</button></div>
+      <p className="text-sm text-white/60">{t('Choose a verified catalog title; ambiguous titles are never matched automatically.')}</p>
+      {candidates.length>0&&<div className="max-h-48 space-y-1 overflow-y-auto">{candidates.map(c=><button key={`${c.type}:${c.id}`} className="w-full rounded bg-white/5 p-2 text-left text-sm hover:bg-white/15" onClick={()=>saveMatch(c)} disabled={busy}>
+        {c.title} ({c.year||'?'}) · {Math.round(c.confidence*100)}% {t('confidence')}
+      </button>)}</div>}
+      <CatalogPicker onSelect={item=>item.type===editing.type?saveMatch(item):notify(t('Choose the same media type as the file.'))}/>
+      <button className={btn} onClick={()=>saveMatch(null)} disabled={busy}>{t('Clear metadata match')}</button>
+    </div>}
+    <div className="max-h-[600px] space-y-2 overflow-y-auto">{filtered.map(i=><div key={i.id} className="flex items-center gap-3 rounded bg-white/5 p-3">
+      {i.poster?<img className="h-20 w-14 shrink-0 rounded object-cover" src={img(i.poster,'w92')} alt=""/>:<div className="h-20 w-14 shrink-0 rounded bg-white/10"/>}
+      <div className="min-w-0 flex-1"><strong className="block truncate">{i.title}</strong>
+        <span className="text-xs text-white/50">{i.season!=null&&`S${i.season} E${i.episode} · `}{(i.sizeBytes/1024**3).toFixed(2)} GB</span>
+        <span className="block text-xs text-white/50">{i.tmdbId?`${t('TMDB matched')} · ${i.matchState}`:t('Metadata not matched')}</span></div>
+      <div className="flex flex-wrap gap-2">{isAdmin&&<button className={btn} onClick={()=>editMatch(i)}>{t('Match')}</button>}
+        <button className={btn} onClick={()=>play({type:'raw',title:i.title,localMediaId:i.id,poster:i.poster,
+          contentKey:`raw:local:${i.id}`,season:i.season,episode:i.episode})}>{t('Play')}</button></div></div>)}
       {filtered.length===0&&<p className="text-white/50">{t('No local videos indexed yet.')}</p>}
     </div>
   </section>;

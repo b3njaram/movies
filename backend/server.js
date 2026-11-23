@@ -48,9 +48,11 @@ import {
 import {validHash,validFileIndex,downloadName,convertOptions,deviceId,safeContentKey as safeAdvancedContentKey} from './advanced-rules.js';
 import {startAdvancedJobs,setDownloadTouch,wakeDownloads,cancelCurrent,removeJobFiles,localFileStatus,serverRuntime,createBackup,listBackups,backupFile,convertVideo} from './advanced-worker.js';
 import {listCollections,createCollection,deleteCollection,changeCollectionItem,submitRequest,listRequests,requestStatus,
-  partyDetails,createParty,joinParty,pollParty,updateParty,leaveParty} from './community-db.js';
+  partyDetails,createParty,joinParty,pollParty,updateParty,leaveParty,listPartyChat,sendPartyChat} from './community-db.js';
 import {mediaType,positiveId,roomSpec} from './community-rules.js';
-import {scanLocalMedia,listLocalMedia,localMediaFile} from './local-media.js';
+import {scanLocalMedia,listLocalMedia,localMediaFile,localMediaById,unmatchedLocalMedia,saveLocalMediaMatch,noteMatchAttempt} from './local-media.js';
+import {chooseAutomaticMatch,matchConfidence} from './metadata-match.js';
+import {probeLocalSubtitles,extractLocalSubtitle} from './local-subtitles.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
 const PROWLARR_API_KEY = process.env.PROWLARR_API_KEY || '';
@@ -439,9 +441,75 @@ app.put('/api/community/parties/:code',withProfile,(req,res)=>res.json({party:up
 app.delete('/api/community/parties/:code',withProfile,(req,res)=>{
   leaveParty(req.profile.id,req.params.code);res.json({ok:true});
 });
+// A room member may exchange short text messages; only the room code and
+// authenticated profile determine access. The host cannot impersonate others.
+app.get('/api/community/parties/:code/chat',withProfile,wrap(async(req,res)=>{
+  const room=partyDetails(req.profile.id,req.params.code);
+  await enforceTitleRating(req.profile,room.type,room.tmdbId);
+  res.json({messages:listPartyChat(req.profile.id,req.params.code,req.query.after||0)});
+}));
+app.post('/api/community/parties/:code/chat',withProfile,wrap(async(req,res)=>{
+  const room=partyDetails(req.profile.id,req.params.code);
+  await enforceTitleRating(req.profile,room.type,room.tmdbId);
+  res.status(201).json(sendPartyChat(req.profile.id,req.params.code,req.body?.message));
+}));
 // Scanning is bounded, non-recursive beyond 3 levels, and limited to the
 // backend's existing /app/data/media directory. Nothing is downloaded.
 app.post('/api/admin/local-media/scan',requireAdmin,(req,res)=>res.json(scanLocalMedia()));
+// Search is bounded, and only high-confidence, unambiguous matches are saved.
+// A TMDB mismatch can always be corrected manually by an administrator.
+app.post('/api/admin/local-media/auto-match',requireAdmin,requireTmdb,wrap(async(req,res)=>{
+  const rows=unmatchedLocalMedia(6);
+  let matched=0,review=0,failed=0;
+  for(const row of rows){
+    try{
+      const candidates=(await searchTitles(row.title)).filter(x=>x.type===row.media_type);
+      const local={title:row.title,type:row.media_type,year:row.year};
+      const best=chooseAutomaticMatch(local,candidates);
+      if(best){saveLocalMediaMatch(row.id,best,{automatic:true,confidence:best.confidence});matched++;}
+      else review++;
+    }catch(e){failed++;console.warn('[media-match]',row.id,e.message);}
+    finally {noteMatchAttempt(row.id);}
+  }
+  res.json({checked:rows.length,matched,review,failed});
+}));
+app.get('/api/admin/local-media/:id/candidates',requireAdmin,requireTmdb,wrap(async(req,res)=>{
+  const row=localMediaById(req.params.id);
+  if(!row)throw httpError(404,'Local media not found.');
+  const local={title:row.title,type:row.media_type,year:row.year};
+  const candidates=(await searchTitles(row.title)).filter(x=>x.type===row.media_type)
+    .map(x=>({...x,confidence:matchConfidence(local,x)}))
+    .sort((a,b)=>b.confidence-a.confidence).slice(0,12);
+  res.json({candidates});
+}));
+app.put('/api/admin/local-media/:id/match',requireAdmin,requireTmdb,wrap(async(req,res)=>{
+  const row=localMediaById(req.params.id);
+  if(!row)throw httpError(404,'Local media not found.');
+  if(req.body?.clear)return res.json({media:saveLocalMediaMatch(row.id,null)});
+  const id=Number(req.body?.id),type=req.body?.type;
+  if(!Number.isSafeInteger(id)||id<1||type!==row.media_type)throw httpError(400,'Invalid movie/series match.');
+  const title=await getTitle(type,id);
+  res.json({media:saveLocalMediaMatch(row.id,title)});
+}));
+// FFprobe/FFmpeg operate solely on local files resolved by the backend;
+// requested IDs can never supply paths or arbitrary URLs.
+app.get('/api/subtitles/embedded/:kind/:id',withActiveProfile,wrap(async(req,res)=>{
+  let file;
+  if(req.params.kind==='media'){
+    if(req.profile.maxAge<18)throw httpError(403,'Unrated local files require an adult profile.');
+    file=localMediaFile(req.params.id)?.file;
+  }else if(req.params.kind==='library'){
+    const job=getDownload(Number(req.params.id));
+    if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)throw httpError(404,'Video not found.');
+    if(req.profile.maxAge<18)await enforceTitleRating(req.profile,job.media_type,job.tmdb_id);
+    file=localFileStatus(job);
+  }else throw httpError(404,'Unknown subtitle source.');
+  if(!file)throw httpError(404,'Video file not found.');
+  res.set({'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'});
+  if(req.query.track===undefined)return res.json({subtitles:await probeLocalSubtitles(file)});
+  const data=await extractLocalSubtitle(file,req.query.track);
+  res.type('text/vtt').send(data);
+}));
 app.get('/api/local-media',withProfile,(req,res)=>{
   if(req.profile.maxAge<18)return res.status(403).json({error:'Unrated local files require an unrestricted profile.'});
   res.json({items:listLocalMedia()});
