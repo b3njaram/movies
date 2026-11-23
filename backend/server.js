@@ -740,8 +740,15 @@ app.get('/api/stats/:hash', withActiveProfile, requireGrantedFile, wrap(async (r
 
 // One server-side download at a time. Source references have already gone
 // through /api/stream, which validates index and age permissions.
-app.get('/api/downloads/queue',withProfile,(req,res)=>res.json({jobs:listDownloads(req.profile.id)}));
-app.get('/api/library',withProfile,(req,res)=>res.json({items:listReady(req.profile.id)}));
+async function allowedLibraryItems(profile,rows) {
+  if(profile.maxAge>=18)return rows;
+  const checked=await Promise.all(rows.map(async row=>{
+    try {await enforceTitleRating(profile,row.media_type,row.tmdb_id);return row;}catch{return null;}
+  }));
+  return checked.filter(Boolean);
+}
+app.get('/api/downloads/queue',withProfile,wrap(async(req,res)=>res.json({jobs:await allowedLibraryItems(req.profile,listDownloads(req.profile.id))})));
+app.get('/api/library',withProfile,wrap(async(req,res)=>res.json({items:await allowedLibraryItems(req.profile,listReady(req.profile.id))})));
 app.post('/api/downloads/queue',withProfile,wrap(async(req,res)=>{
   const b=req.body||{};
   const hash=validHash(b.hash),index=validFileIndex(b.index);
@@ -775,21 +782,23 @@ app.post('/api/downloads/queue/:id',withProfile,(req,res)=>{
   }else return res.status(400).json({error:'This action is not available for this download.'});
   res.json({ok:true});
 });
-app.get('/api/library/stream/:id',withActiveProfile,(req,res)=>{
+app.get('/api/library/stream/:id',withActiveProfile,wrap(async(req,res)=>{
   const job=getDownload(Number(req.params.id));
   if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)return res.sendStatus(404);
+  if(req.profile.maxAge<18)await enforceTitleRating(req.profile,job.media_type,job.tmdb_id);
   const file=localFileStatus(job);
   if(!file)return res.status(404).json({error:'Saved video not found.'});
   res.setHeader('Cache-Control','no-store');
   recordEvent('local_playback',req.profile.id);
   res.sendFile(file,{acceptRanges:true});
-});
+}));
 app.get('/api/video/convert',withActiveProfile,wrap(async(req,res)=>{
   const opts=convertOptions(req.query);
   let url;
   if(req.query.libraryId){
     const job=getDownload(Number(req.query.libraryId));
     if(!job||job.user_id!==req.user.id||job.profile_id!==req.profile.id)throw httpError(404,'Saved video not found.');
+    if(req.profile.maxAge<18)await enforceTitleRating(req.profile,job.media_type,job.tmdb_id);
     url=localFileStatus(job);
     if(!url)throw httpError(404,'Saved video file missing.');
   }else{
