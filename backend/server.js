@@ -47,6 +47,10 @@ import {
 } from './advanced-db.js';
 import {validHash,validFileIndex,downloadName,convertOptions,deviceId,safeContentKey as safeAdvancedContentKey} from './advanced-rules.js';
 import {startAdvancedJobs,setDownloadTouch,wakeDownloads,cancelCurrent,removeJobFiles,localFileStatus,serverRuntime,createBackup,listBackups,backupFile,convertVideo} from './advanced-worker.js';
+import {listCollections,createCollection,deleteCollection,changeCollectionItem,submitRequest,listRequests,requestStatus,
+  partyDetails,createParty,joinParty,pollParty,updateParty,leaveParty} from './community-db.js';
+import {mediaType,positiveId,roomSpec} from './community-rules.js';
+import {scanLocalMedia,listLocalMedia,localMediaFile} from './local-media.js';
 
 const PROWLARR_URL = (process.env.PROWLARR_URL || 'http://localhost:9696').replace(/\/$/, '');
 const PROWLARR_API_KEY = process.env.PROWLARR_API_KEY || '';
@@ -364,6 +368,91 @@ async function enforceTitleRating(profile,type,id) {
   if (!allowedByRating(title.certification,profile.maxAge)) throw httpError(403, 'This title exceeds the profile age rating.');
   return title;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: community collections, title requests, watch parties, local files.
+// Every non-admin endpoint requires an unlocked profile. Kids restrictions
+// are enforced for every title, not merely hidden in the frontend.
+// ---------------------------------------------------------------------------
+app.get('/api/community/collections',withProfile,wrap(async(req,res)=>{
+  const collections=listCollections(req.profile.id);
+  if(req.profile.maxAge<18){
+    for(const collection of collections){
+      const visible=await Promise.all(collection.items.slice(0,100).map(async item=>{
+        try {await enforceTitleRating(req.profile,item.type,item.id);return item;}catch{return null;}
+      }));
+      collection.items=visible.filter(Boolean);
+    }
+  }
+  res.json({collections});
+}));
+app.post('/api/community/collections',withProfile,(req,res)=>{
+  const id=createCollection(req.profile.id,req.body?.name);
+  res.status(201).json({id});
+});
+app.delete('/api/community/collections/:id',withProfile,(req,res)=>{
+  deleteCollection(req.profile.id,req.params.id);res.json({ok:true});
+});
+app.post('/api/community/collections/:id/items',withProfile,wrap(async(req,res)=>{
+  const b=req.body||{};
+  const type=mediaType(b.type),id=positiveId(b.id);
+  await enforceTitleRating(req.profile,type,id);
+  changeCollectionItem(req.profile.id,req.params.id,{...b,type,id});
+  res.json({ok:true});
+}));
+app.delete('/api/community/collections/:id/items',withProfile,(req,res)=>{
+  changeCollectionItem(req.profile.id,req.params.id,req.body||{},true);
+  res.json({ok:true});
+});
+app.get('/api/community/requests',withProfile,(req,res)=>res.json({requests:listRequests(req.profile.id)}));
+app.post('/api/community/requests',withProfile,wrap(async(req,res)=>{
+  const b=req.body||{};
+  if(req.profile.maxAge<18){
+    if(!b.tmdbId)throw httpError(403,'Choose a rated catalog title for this profile.');
+    await enforceTitleRating(req.profile,b.type,b.tmdbId);
+  }
+  const id=submitRequest(req.profile.id,b);
+  res.status(201).json({id});
+}));
+app.get('/api/admin/community/requests',requireAdmin,(req,res)=>res.json({requests:listRequests(req.user.id,true)}));
+app.patch('/api/admin/community/requests/:id',requireAdmin,(req,res)=>{
+  requestStatus(req.params.id,req.body?.status);res.json({ok:true});
+});
+// The room shares a content identifier and playback clock, NEVER file URLs,
+// torrents, profile credentials or authorization tokens.
+app.post('/api/community/parties',withProfile,wrap(async(req,res)=>{
+  const spec=roomSpec(req.body);
+  await enforceTitleRating(req.profile,spec.type,spec.tmdbId);
+  res.status(201).json({party:createParty(req.profile.id,spec)});
+}));
+app.post('/api/community/parties/:code/join',withProfile,wrap(async(req,res)=>{
+  const room=partyDetails(req.profile.id,req.params.code,true);
+  await enforceTitleRating(req.profile,room.type,room.tmdbId);
+  res.json({party:joinParty(req.profile.id,room.code)});
+}));
+app.get('/api/community/parties/:code',withProfile,wrap(async(req,res)=>{
+  const room=pollParty(req.profile.id,req.params.code);
+  await enforceTitleRating(req.profile,room.type,room.tmdbId);
+  res.json({party:room});
+}));
+app.put('/api/community/parties/:code',withProfile,(req,res)=>res.json({party:updateParty(req.profile.id,req.params.code,req.body||{})}));
+app.delete('/api/community/parties/:code',withProfile,(req,res)=>{
+  leaveParty(req.profile.id,req.params.code);res.json({ok:true});
+});
+// Scanning is bounded, non-recursive beyond 3 levels, and limited to the
+// backend's existing /app/data/media directory. Nothing is downloaded.
+app.post('/api/admin/local-media/scan',requireAdmin,(req,res)=>res.json(scanLocalMedia()));
+app.get('/api/local-media',withProfile,(req,res)=>{
+  if(req.profile.maxAge<18)return res.status(403).json({error:'Unrated local files require an unrestricted profile.'});
+  res.json({items:listLocalMedia()});
+});
+app.get('/api/local-media/stream/:id',withActiveProfile,(req,res)=>{
+  if(req.profile.maxAge<18)return res.sendStatus(403);
+  const result=localMediaFile(req.params.id);
+  if(!result)return res.status(404).json({error:'Local file not found.'});
+  res.setHeader('Cache-Control','private, no-store');
+  res.sendFile(result.file,{acceptRanges:true});
+});
 
 // ---------------------------------------------------------------------------
 // Service status (Prowlarr key, TorrServer, TMDB)
