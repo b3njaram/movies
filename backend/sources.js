@@ -219,6 +219,10 @@ export function scoreRelease(p, seeders, sizeBytes, want = {}) {
   else if (seeders < 3) s -= 15;
 
   if (want.type === 'tv' && want.episode != null) {
+    // A season pack can be useful, but fetching a huge pack to watch one episode
+    // increases startup time and storage pressure on small self-hosted servers.
+    // Only penalize *known* season packs; do not penalize episode-sized releases.
+    if (p.pack && gb > 5) s -= Math.min(50, Math.round(Math.log2(gb / 5) * 12));
     if (p.season === want.season && p.episode === want.episode) s += 40;
     else if (p.pack && p.packSeason === want.season) s += 5;
     else if (p.pack && p.packSeason == null) s -= 10;
