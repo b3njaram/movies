@@ -5,7 +5,7 @@ import {api,BASE} from './api';
 
 const format=n=>n>0?`${(n/1024**3).toFixed(2)} GB`:'—';
 export async function saveOffline(src,details,onProgress=()=>{}){
-  const {downloadOfflineVideo}=await import(/* @vite-ignore */ '/offline-store.js');
+  const {downloadOfflineVideo}=await import(/* @vite-ignore */ window.location.origin + '/offline-store.js');
   return downloadOfflineVideo({src, ...details, onProgress});
 }
 export default function Offline(){
@@ -13,7 +13,7 @@ export default function Offline(){
   const [items,setItems]=useState([]);const [local,setLocal]=useState([]);const [status,setStatus]=useState('');
   const [busy,setBusy]=useState(null);
   const refresh=async()=>{
-    const [library,media,store]=await Promise.all([api('/api/library').catch(()=>({items:[]})),api('/api/local-media').catch(()=>({items:[]})),import(/* @vite-ignore */ '/offline-store.js').then(m=>m.listOfflineVideos()).catch(()=>[])]);
+    const [library,media,store]=await Promise.all([api('/api/library').catch(()=>({items:[]})),api('/api/local-media').catch(()=>({items:[]})),import(/* @vite-ignore */ window.location.origin + '/offline-store.js').then(m=>m.listOfflineVideos()).catch(()=>[])]);
     setItems([...(library.items||[]).map(x=>({...x,kind:'library'})),...(media.items||media.media||[]).map(x=>({...x,kind:'media'}))]);setLocal(store);
   };
   useEffect(()=>{refresh().catch(()=>{});},[profile?.id]);
